@@ -16,18 +16,24 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       proxy: {
-        '/start': 'http://localhost:5112',
-        '/api/ask': 'http://localhost:5112',
-        '/events': 'http://localhost:5112',
-        '/human': 'http://localhost:5112',
-        '/threads': 'http://localhost:5112',
-        '/thread': 'http://localhost:5112',
-        '/save': 'http://localhost:5112',
+        '/start': 'http://localhost:3000',
+        '/api': 'http://localhost:3000',
+        '/human': 'http://localhost:3000',
+        '/threads': 'http://localhost:3000',
+        '/thread': 'http://localhost:3000',
+        '/save': 'http://localhost:3000',
+        '/stream': {
+          target: 'http://localhost:3000',
+          // SSE needs special handling
+          configure: (proxy) => {
+            proxy.on('proxyRes', (proxyRes) => {
+              proxyRes.headers['cache-control'] = 'no-cache';
+              proxyRes.headers['x-accel-buffering'] = 'no';
+            });
+          },
+        },
       },
-      hmr: process.env.DISABLE_HMR !== 'true',
     },
   };
 });
