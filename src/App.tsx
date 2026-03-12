@@ -55,8 +55,10 @@ export default function App() {
   const [recommendation, setRecommendation] = useState<string | null>(null);
   const [keyCaveat, setKeyCaveat] = useState<string | null>(null);
   const [nextStep, setNextStep] = useState<string | null>(null);
-  const [elapsedTime, setElapsedTime] = useState<number | null>(null);
-  const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
+  const [elapsedTime, setElapsedTime] = useState<string | null>(null);
+  const [estimatedCost, setEstimatedCost] = useState<string | null>(null);
+  const [liveCost, setLiveCost] = useState<number>(0);
+  const [liveElapsed, setLiveElapsed] = useState<number>(0);
   const [agentPayload, setAgentPayload] = useState<any | null>(null);
   const [stakes, setStakes] = useState<'low' | 'medium' | 'high'>('medium');
   const [reversible, setReversible] = useState<boolean>(true);
@@ -122,6 +124,29 @@ export default function App() {
     }
   }, [threads]);
 
+  // Persist messages per thread to localStorage
+  useEffect(() => {
+    if (activeThreadId && messages.length > 0) {
+      localStorage.setItem(`council_msgs_${activeThreadId}`, JSON.stringify(messages));
+      if (recap) localStorage.setItem(`council_recap_${activeThreadId}`, recap);
+    }
+  }, [messages, recap, activeThreadId]);
+
+  // Load messages from localStorage when switching threads
+  useEffect(() => {
+    if (activeThreadId) {
+      const savedMsgs = localStorage.getItem(`council_msgs_${activeThreadId}`);
+      if (savedMsgs) {
+        try {
+          const parsed = JSON.parse(savedMsgs);
+          if (parsed.length > 0 && messages.length === 0) setMessages(parsed);
+        } catch {}
+      }
+      const savedRecap = localStorage.getItem(`council_recap_${activeThreadId}`);
+      if (savedRecap && !recap) setRecap(savedRecap);
+    }
+  }, [activeThreadId]);
+
   const fetchThreads = async () => {
     // On serverless, /threads may be empty — merge with localStorage
     try {
@@ -159,6 +184,12 @@ export default function App() {
 
     if (data.type === 'thread_created') {
       // First event — thread ID
+      return;
+    }
+
+    if (data.type === 'cost_update') {
+      setLiveCost(data.totalCost || 0);
+      setLiveElapsed(data.elapsed || 0);
       return;
     }
 
@@ -260,6 +291,10 @@ export default function App() {
     setIsTranscriptExpanded(true);
     setPhase('blind_draft');
     setInputText('');
+    setLiveCost(0);
+    setLiveElapsed(0);
+    setElapsedTime(null);
+    setEstimatedCost(null);
 
     // Abort any previous stream
     if (abortRef.current) abortRef.current.abort();
@@ -531,7 +566,7 @@ export default function App() {
           >
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-3.5 h-3.5" />
-              Protocols Only
+              Approved Only
             </div>
             {showProtocolsOnly && <X className="w-3 h-3" />}
           </button>
@@ -909,7 +944,7 @@ export default function App() {
                 <div className="h-px flex-1 bg-gradient-to-r from-transparent via-blue-500/30 to-blue-500/50" />
                 <div className="flex flex-col items-center gap-2">
                   <ShieldCheck className="w-10 h-10 text-blue-500" />
-                  <div className="text-xs font-bold uppercase tracking-[0.4em] text-blue-400">DECISION PROTOCOL</div>
+                  <div className="text-xs font-bold uppercase tracking-[0.4em] text-blue-400">DECISION SUMMARY</div>
                 </div>
                 <div className="h-px flex-1 bg-gradient-to-l from-transparent via-blue-500/30 to-blue-500/50" />
               </div>
@@ -982,8 +1017,8 @@ export default function App() {
                   )}
 
                   <div className="flex items-center gap-4 text-[10px] font-mono text-white/30 pt-4">
-                    <span>ELAPSED: {elapsedTime !== null ? `${elapsedTime.toFixed(1)}s` : '12.4s'}</span>
-                    <span>EST. COST: {estimatedCost !== null ? `$${estimatedCost.toFixed(3)}` : '$0.042'}</span>
+                    <span>ELAPSED: {elapsedTime || `${liveElapsed.toFixed(0)}s`}</span>
+                    <span>COST: {estimatedCost || `$${liveCost.toFixed(3)}`}</span>
                   </div>
                 </div>
 
@@ -1062,7 +1097,7 @@ export default function App() {
                       )}
                     >
                       <ShieldCheck className="w-4 h-4" />
-                      {protocols.has(activeThreadId) ? "Protocol Committed" : "Approve & Commit Protocol"}
+                      {protocols.has(activeThreadId) ? "Decision Approved" : "Approve Decision"}
                     </button>
                     <button 
                       onClick={() => alert('Decision posted to #ai-comms')}
@@ -1266,6 +1301,15 @@ export default function App() {
                 >
                   {reversible ? "REVERSIBLE" : "IRREVERSIBLE"}
                 </button>
+              </div>
+            )}
+            {isLoading && (liveCost > 0 || liveElapsed > 0) && (
+              <div className="flex items-center justify-center gap-6 py-2 text-[11px] font-mono text-white/40">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  {liveElapsed.toFixed(0)}s elapsed
+                </span>
+                <span className="text-emerald-400/70">${liveCost.toFixed(3)} spent</span>
               </div>
             )}
             <div className="relative group">

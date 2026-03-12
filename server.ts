@@ -66,6 +66,25 @@ Rate confidence levels. Identify what would change the answer.`,
 
 const DEFAULT_SYSTEM = "You are an AI analyst in a decision council. Get to the right answer. Be thorough.";
 
+// --- Cost tracking ---
+// OpenRouter pricing per 1M tokens (approximate, updated March 2026)
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "anthropic/claude-opus-4.6":          { input: 15, output: 75 },
+  "google/gemini-3.1-pro-preview":      { input: 1.25, output: 5 },
+  "openai/gpt-5.4-pro":                 { input: 10, output: 30 },
+  "openai/o3-pro":                      { input: 20, output: 80 },
+  "deepseek/deepseek-v3.2-speciale":    { input: 0.5, output: 2 },
+  "anthropic/claude-3.5-haiku":         { input: 0.8, output: 4 },
+  "google/gemini-3.1-flash-lite-preview": { input: 0.075, output: 0.3 },
+  "openai/gpt-4o-mini":                 { input: 0.15, output: 0.6 },
+};
+
+interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  cost: number; // in USD
+}
+
 // --- In-memory state ---
 interface ThreadData {
   id: string;
@@ -78,6 +97,8 @@ interface ThreadData {
   reversible?: boolean;
   recap?: string;
   systemContext?: string; // Human-injected system prompt / context
+  totalCost: number;  // Running cost in USD
+  startTime?: number; // ms timestamp
 }
 
 const threads = new Map<string, ThreadData>();
@@ -122,7 +143,12 @@ function addMessage(threadId: string, msg: any) {
 }
 
 // --- Model API calls ---
-async function callOpenRouter(modelId: string, prompt: string, system: string): Promise<string> {
+interface ModelResponse {
+  text: string;
+  usage: TokenUsage;
+}
+
+async function callOpenRouter(modelId: string, prompt: string, system: string): Promise<ModelResponse> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("No OPENROUTER_API_KEY configured");
 
@@ -150,10 +176,18 @@ async function callOpenRouter(modelId: string, prompt: string, system: string): 
   }
 
   const data = await resp.json();
-  return data.choices?.[0]?.message?.content || "[No response]";
+  const text = data.choices?.[0]?.message?.content || "[No response]";
+
+  // Extract token usage and calculate cost
+  const promptTokens = data.usage?.prompt_tokens || 0;
+  const completionTokens = data.usage?.completion_tokens || 0;
+  const pricing = MODEL_PRICING[modelId] || { input: 5, output: 15 };
+  const cost = (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
+
+  return { text, usage: { promptTokens, completionTokens, cost } };
 }
 
-async function callGoogle(modelId: string, prompt: string, system: string): Promise<string> {
+async function callGoogle(modelId: string, prompt: string, system: string): Promise<ModelResponse> {
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("No GOOGLE_API_KEY or GEMINI_API_KEY configured");
 
@@ -174,10 +208,16 @@ async function callGoogle(modelId: string, prompt: string, system: string): Prom
   }
 
   const data = await resp.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || "[No response]";
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "[No response]";
+  const promptTokens = data.usageMetadata?.promptTokenCount || 0;
+  const completionTokens = data.usageMetadata?.candidatesTokenCount || 0;
+  const pricing = MODEL_PRICING[modelId] || { input: 1, output: 4 };
+  const cost = (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
+
+  return { text, usage: { promptTokens, completionTokens, cost } };
 }
 
-async function callModel(key: string, prompt: string, systemOverride?: string): Promise<string> {
+async function callModel(key: string, prompt: string, systemOverride?: string): Promise<ModelResponse> {
   const cfg = MODELS[key];
   if (!cfg) throw new Error(`Unknown model: ${key}`);
   const system = systemOverride || SYSTEM_PROMPTS[key] || DEFAULT_SYSTEM;
@@ -197,6 +237,16 @@ async function runDiscussion(threadId: string, topic: string, modelKeys: string[
 
   const thread = threads.get(threadId);
   if (!thread) return;
+
+  const startTime = Date.now();
+  thread.startTime = startTime;
+  thread.totalCost = 0;
+
+  // Helper to track cost and send running total
+  const trackCost = (usage: TokenUsage) => {
+    thread.totalCost += usage.cost;
+    sendEvent(threadId, { type: "cost_update", totalCost: thread.totalCost, elapsed: (Date.now() - startTime) / 1000 });
+  };
 
   // Inject human system context if provided
   const contextPrefix = thread.systemContext
@@ -227,10 +277,11 @@ Get to the answer. No filler. Think as deeply as needed.`;
 
     try {
       const t0 = Date.now();
-      const text = await callModel(key, prompt);
-      console.log(`  ✅ ${cfg.name} responded (${((Date.now() - t0) / 1000).toFixed(0)}s, ${text.length} chars)`);
-      addMessage(threadId, { type: "message", role: "model", name: key, text, done: true });
-      round1Results.push({ key, name: cfg.name, text });
+      const response = await callModel(key, prompt);
+      trackCost(response.usage);
+      console.log(`  ✅ ${cfg.name} responded (${((Date.now() - t0) / 1000).toFixed(0)}s, ${response.text.length} chars, $${response.usage.cost.toFixed(4)})`);
+      addMessage(threadId, { type: "message", role: "model", name: key, text: response.text, done: true });
+      round1Results.push({ key, name: cfg.name, text: response.text });
     } catch (err: any) {
       console.error(`  ❌ ${cfg.name} FAILED:`, err.message);
       addMessage(threadId, { type: "message", role: "model", name: key, text: `[Error: ${err.message}]`, done: true });
@@ -247,7 +298,7 @@ Get to the answer. No filler. Think as deeply as needed.`;
     return;
   }
 
-  // ── ROUND 2: Pressure-test and converge ──
+  // ── ROUND 2: Parallel pressure-test and converge ──
   addMessage(threadId, {
     type: "status", phase: "targeted_debate",
     text: "Round 2 — Models pressure-testing each other's analyses.",
@@ -256,7 +307,7 @@ Get to the answer. No filler. Think as deeply as needed.`;
   const allPositions = validR1.map(r => `**${r.name}:** ${r.text}`).join("\n\n");
   const round2Results: { key: string; name: string; text: string }[] = [];
 
-  for (const key of models) {
+  const round2Promises = models.map(async (key) => {
     const cfg = MODELS[key];
     const ownR1 = validR1.find(r => r.key === key);
 
@@ -278,18 +329,29 @@ Now that you've seen everyone's analysis:
 Converge on the RIGHT answer, not defend your original take.`;
 
     try {
-      const text = await callModel(key, prompt);
-      addMessage(threadId, { type: "message", role: "model", name: key, text, done: true });
-      round2Results.push({ key, name: cfg.name, text });
+      const response = await callModel(key, prompt);
+      trackCost(response.usage);
+      addMessage(threadId, { type: "message", role: "model", name: key, text: response.text, done: true });
+      round2Results.push({ key, name: cfg.name, text: response.text });
     } catch (err: any) {
       addMessage(threadId, { type: "message", role: "model", name: key, text: `[Error: ${err.message}]`, done: true });
     }
-  }
+  });
+
+  await Promise.all(round2Promises);
 
   // ── ROUND 3: Synthesis and Recommendation ──
+  // Use the best-tier model from the selected models for synthesis
+  const tierPriority = ["best", "fast", "light"];
+  const synthModelKey = models.sort((a, b) => {
+    const aTier = tierPriority.indexOf(MODELS[a]?.tier || "light");
+    const bTier = tierPriority.indexOf(MODELS[b]?.tier || "light");
+    return aTier - bTier;
+  })[0] || "gemini";
+
   addMessage(threadId, {
     type: "status", phase: "synthesizing",
-    text: "Round 3 — Synthesizing recommendation.",
+    text: `Round 3 — ${MODELS[synthModelKey]?.name || synthModelKey} synthesizing recommendation.`,
   });
 
   const allR2 = round2Results.map(r => `**${r.name} (Round 2):** ${r.text}`).join("\n\n");
@@ -320,7 +382,9 @@ This is a decision tool, not a debate summary. Give the founder the answer.`;
   let consensusType: "unanimous" | "additive" | "divergent" = "additive";
 
   try {
-    synthesisText = await callModel("gemini", synthPrompt, synthSystem);
+    const response = await callModel(synthModelKey, synthPrompt, synthSystem);
+    synthesisText = response.text;
+    trackCost(response.usage);
 
     if (synthesisText.includes("VERY HIGH")) confidence = 95;
     else if (synthesisText.includes("HIGH")) confidence = 85;
@@ -336,6 +400,8 @@ This is a decision tool, not a debate summary. Give the founder the answer.`;
     addMessage(threadId, { type: "message", role: "model", name: "moderator", text: synthesisText, done: true });
   }
 
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
   sendEvent(threadId, {
     type: "recap",
     text: synthesisText,
@@ -344,6 +410,8 @@ This is a decision tool, not a debate summary. Give the founder the answer.`;
     recommendation: "See synthesis above.",
     keyCaveat: "Review confidence assessment.",
     nextStep: "Follow the Next Actions in the synthesis.",
+    elapsedTime: `${elapsed}s`,
+    estimatedCost: `$${thread.totalCost.toFixed(3)}`,
   });
 
   if (thread) {
@@ -382,8 +450,8 @@ The founder just said: "${humanText}"
 Respond directly as ${cfg.name}, the ${cfg.role}.`;
 
     try {
-      const text = await callModel(key, prompt);
-      addMessage(threadId, { type: "message", role: "model", name: key, text, done: true });
+      const response = await callModel(key, prompt);
+      addMessage(threadId, { type: "message", role: "model", name: key, text: response.text, done: true });
     } catch (err: any) {
       addMessage(threadId, { type: "message", role: "model", name: key, text: `[Error: ${err.message}]`, done: true });
     }
@@ -420,7 +488,7 @@ app.post("/start", async (req, res) => {
   threads.set(tid, {
     id: tid, topic, status: "active", created: new Date().toISOString(),
     models, messages: [], stakes: req.body.stakes, reversible: req.body.reversible,
-    systemContext,
+    systemContext, totalCost: 0,
   });
 
   // Stream SSE directly on this response (works in serverless)
@@ -458,7 +526,7 @@ app.post("/api/ask", requireApiKey, async (req, res) => {
   const tid = generateId();
   threads.set(tid, {
     id: tid, topic: question, status: "active", created: new Date().toISOString(),
-    models, messages: [], systemContext,
+    models, messages: [], systemContext, totalCost: 0,
   });
 
   if (sync) {
