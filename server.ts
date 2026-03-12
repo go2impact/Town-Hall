@@ -32,12 +32,12 @@ interface ModelConfig {
 
 const MODELS: Record<string, ModelConfig> = {
   claude:   { name: "Claude Opus 4.6",  color: "#5b9bf5", role: "Architect",      provider: "openrouter", modelId: "anthropic/claude-opus-4-6",          tier: "best" },
-  gemini:   { name: "Gemini 3.1 Pro",   color: "#34d399", role: "Context Keeper", provider: "google",     modelId: "gemini-3.1-pro-preview",             tier: "fast" },
+  gemini:   { name: "Gemini 3.1 Pro",   color: "#34d399", role: "Context Keeper", provider: "openrouter", modelId: "google/gemini-2.5-pro-preview",       tier: "fast" },
   gpt5:     { name: "GPT-5.4 Pro",      color: "#a78bfa", role: "Challenger",     provider: "openrouter", modelId: "openai/gpt-5.4-pro",                 tier: "fast" },
   o3:       { name: "o3-Pro",           color: "#ef4444", role: "Reasoning",      provider: "openrouter", modelId: "openai/o3-pro",                      tier: "best" },
   deepseek: { name: "DeepSeek V3.2",    color: "#fb923c", role: "Logic Checker",  provider: "openrouter", modelId: "deepseek/deepseek-v3.2-speciale",    tier: "fast" },
   haiku:      { name: "Claude 3.5 Haiku", color: "#60a5fa", role: "Fast Analyst",  provider: "openrouter", modelId: "anthropic/claude-3.5-haiku",         tier: "light" },
-  flash:      { name: "Gemini Flash",     color: "#10b981", role: "Fast Context",  provider: "google",     modelId: "gemini-2.5-flash-preview",           tier: "light" },
+  flash:      { name: "Gemini Flash",     color: "#10b981", role: "Fast Context",  provider: "openrouter", modelId: "google/gemini-2.5-flash-preview",     tier: "light" },
   "gpt4o-mini": { name: "GPT-4o Mini",   color: "#c084fc", role: "Fast General",  provider: "openrouter", modelId: "openai/gpt-4o-mini",                 tier: "light" },
 };
 
