@@ -99,7 +99,7 @@ interface TokenUsage {
 interface ThreadData {
   id: string;
   topic: string;
-  status: "active" | "awaiting_input" | "complete" | "saved";
+  status: "active" | "clarifying" | "awaiting_input" | "complete" | "saved";
   created: string;
   models: string[];
   messages: any[];
@@ -263,6 +263,52 @@ async function runDiscussion(threadId: string, topic: string, modelKeys: string[
     ? `\n\nAdditional context from the founder:\n${thread.systemContext}\n\n`
     : "";
 
+  // ── ROUND 0: Clarifying Questions ──
+  // Each model asks 1-3 clarifying questions to get more context before analysis
+  addMessage(threadId, {
+    type: "status", phase: "clarification",
+    text: `Round 0 — Models are asking clarifying questions before diving in`,
+  });
+
+  const clarifyResults: { key: string; name: string; text: string }[] = [];
+
+  const clarifyPromises = models.slice(0, 3).map(async (key) => {
+    const cfg = MODELS[key];
+    addMessage(threadId, { type: "message", role: "model", name: key, text: "Thinking about what to ask...", done: false });
+
+    const clarifyPrompt = `The founder is asking: ${topic}${contextPrefix}
+
+Before you analyze this, what 1-3 clarifying questions would help you give a MUCH better answer?
+
+Think about:
+- What assumptions are you making that might be wrong?
+- What context would dramatically change your recommendation?
+- What constraints or requirements aren't clear?
+
+Be specific and brief. Format as a numbered list. Only ask questions that would genuinely change your analysis — don't ask obvious or filler questions.`;
+
+    try {
+      const response = await callModel(key, clarifyPrompt);
+      trackCost(response.usage);
+      addMessage(threadId, { type: "message", role: "model", name: key, text: response.text, done: true, phase: "clarification" });
+      clarifyResults.push({ key, name: cfg.name, text: response.text });
+    } catch (err: any) {
+      addMessage(threadId, { type: "message", role: "model", name: key, text: `[Error: ${err.message}]`, done: true });
+    }
+  });
+
+  await Promise.all(clarifyPromises);
+
+  // Note: The clarifying questions are shown to the user. The user can always
+  // follow up after the discussion with more context. We don't block the stream
+  // waiting — this keeps the serverless single-request SSE pattern intact.
+  // The questions become part of the discussion record.
+
+  // Rebuild contextPrefix (in case systemContext was provided)
+  const fullContextPrefix = thread.systemContext
+    ? `\n\nAdditional context from the founder:\n${thread.systemContext}\n\n`
+    : "";
+
   // ── ROUND 1: Parallel first-principles analysis ──
   addMessage(threadId, {
     type: "status", phase: "blind_draft",
@@ -275,7 +321,7 @@ async function runDiscussion(threadId: string, topic: string, modelKeys: string[
     const cfg = MODELS[key];
     addMessage(threadId, { type: "message", role: "model", name: key, text: "Analyzing...", done: false });
 
-    const prompt = `The founder is asking: ${topic}${contextPrefix}
+    const prompt = `The founder is asking: ${topic}${fullContextPrefix}
 Analyze from first principles:
 1. What facts do we actually know? (not assumptions)
 2. What are the real constraints?
@@ -323,7 +369,7 @@ Get to the answer. No filler. Think as deeply as needed.`;
 
     addMessage(threadId, { type: "message", role: "model", name: key, text: "Reviewing...", done: false });
 
-    const prompt = `The founder asked: ${topic}${contextPrefix}
+    const prompt = `The founder asked: ${topic}${fullContextPrefix}
 All Round 1 analyses:
 ${allPositions}
 

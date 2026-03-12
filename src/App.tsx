@@ -41,6 +41,18 @@ import { format } from 'date-fns';
 import { cn } from './lib/utils';
 import { Message, Thread, MODELS, ModelKey } from './types';
 
+// Inline tooltip component
+function Tip({ text }: { text: string }) {
+  return (
+    <span className="group/tip relative inline-flex items-center ml-1 cursor-help">
+      <HelpCircle className="w-3 h-3 text-white/20 hover:text-white/50 transition-colors" />
+      <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-3 py-2 rounded-lg bg-[#1a1a1a] border border-white/10 text-[10px] text-white/70 leading-relaxed whitespace-nowrap opacity-0 group-hover/tip:opacity-100 transition-opacity pointer-events-none z-50 shadow-xl max-w-xs">
+        {text}
+      </span>
+    </span>
+  );
+}
+
 export default function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
@@ -402,13 +414,14 @@ export default function App() {
     if (!mentionsAll) {
       const explicitModels: string[] = [];
       if (lowerText.includes('claude') || lowerText.includes('opus')) explicitModels.push(MODELS['Claude Opus 4.6'].id);
-      if (lowerText.includes('gemini')) explicitModels.push(MODELS['Gemini 3.1 Pro'].id);
-      if (lowerText.includes('gpt')) explicitModels.push(MODELS['GPT-5.4 Pro'].id);
+      if (lowerText.includes('gemini') && !lowerText.includes('flash')) explicitModels.push(MODELS['Gemini 3.1 Pro'].id);
+      if (lowerText.includes('gpt') && !lowerText.includes('mini')) explicitModels.push(MODELS['GPT-5.4'].id);
       if (lowerText.includes('o3')) explicitModels.push(MODELS['o3-Pro'].id);
-      if (lowerText.includes('deepseek') || lowerText.includes('r1')) explicitModels.push(MODELS['DeepSeek V3.2'].id);
-      if (lowerText.includes('haiku')) explicitModels.push(MODELS['Claude 3.5 Haiku'].id);
+      if (lowerText.includes('deepseek')) explicitModels.push(MODELS['DeepSeek V3.2'].id);
+      if (lowerText.includes('grok')) explicitModels.push(MODELS['Grok 4'].id);
+      if (lowerText.includes('haiku')) explicitModels.push(MODELS['Claude Haiku'].id);
       if (lowerText.includes('flash')) explicitModels.push(MODELS['Gemini Flash'].id);
-      if (lowerText.includes('mini')) explicitModels.push(MODELS['GPT-4o Mini'].id);
+      if (lowerText.includes('mini')) explicitModels.push(MODELS['GPT-5 Mini'].id);
 
       if (explicitModels.length > 0) {
         modelsToAddress = explicitModels;
@@ -731,6 +744,7 @@ export default function App() {
                   <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
                     <Settings2 className="w-4 h-4" />
                     Council Configuration
+                    <Tip text="Pick which AI models join the discussion. More models = more perspectives but higher cost." />
                   </h3>
                   <div className="flex items-center gap-2">
                     <button
@@ -815,6 +829,7 @@ export default function App() {
                   <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
                     <BookOpen className="w-4 h-4" />
                     Context & Guardrails
+                    <Tip text="Templates set the expertise lens. Business context gives models background info about your situation." />
                   </h3>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -855,16 +870,15 @@ export default function App() {
                     <div className="flex items-center justify-between">
                       <label className="text-sm font-bold">Business Context & RAG</label>
                       <button
-                        onClick={() => setIsRagConnected(!isRagConnected)}
-                        className={cn(
-                          "text-[10px] uppercase tracking-widest font-bold px-2 py-1 rounded-md flex items-center gap-1 transition-colors border",
-                          isRagConnected 
-                            ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20" 
-                            : "bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white"
-                        )}
+                        onClick={() => {
+                          setIsRagConnected(false);
+                          alert('🚧 Connect Context (RAG) is coming in the next version! This will let you connect repos, docs, and data sources directly to your council discussions.');
+                        }}
+                        className="text-[10px] uppercase tracking-widest font-bold px-2 py-1 rounded-md flex items-center gap-1 transition-colors border bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white"
                       >
                         <Database className="w-3 h-3" />
-                        {isRagConnected ? "RAG Connected" : "Connect RAG"}
+                        Connect Context
+                        <span className="ml-1 text-[8px] bg-amber-500/20 text-amber-400 px-1 rounded">SOON</span>
                       </button>
                     </div>
                     <p className="text-xs text-white/40 leading-relaxed">
@@ -885,12 +899,13 @@ export default function App() {
                   <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
                     <Cpu className="w-4 h-4" />
                     Orchestration Policy
+                    <Tip text="Controls how models debate and reach consensus. Higher confidence threshold = stricter agreement required." />
                   </h3>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-bold">Synthesis Strategy</label>
+                      <label className="text-sm font-bold">Synthesis Strategy <Tip text="How models reach a final answer. 'Debate until agree' runs the most thorough analysis." /></label>
                     </div>
                     <div className="space-y-2">
                       {(['majority', 'weighted_consensus', 'debate_to_consensus'] as const).map(strategy => (
@@ -914,7 +929,7 @@ export default function App() {
 
                   <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-bold">Escalation Confidence Threshold</label>
+                      <label className="text-sm font-bold">Escalation Confidence Threshold <Tip text="If the AI's confidence in its answer is below this %, it flags the decision for your review." /></label>
                       <span className="text-sm font-mono text-blue-400">{confidenceThreshold}%</span>
                     </div>
                     <p className="text-xs text-white/40 leading-relaxed">
@@ -963,7 +978,7 @@ export default function App() {
 
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
                     <div className="space-y-1">
-                      <div className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Agreement State</div>
+                      <div className="text-[10px] uppercase tracking-widest text-white/40 font-bold">Agreement State <Tip text="Unanimous = all agree. Additive = mostly agree with additions. Divergent = significant disagreements." /></div>
                       <div className={cn(
                         "text-sm font-bold flex items-center gap-2",
                         isConsensus === 'unanimous' ? "text-emerald-400" : 
@@ -1050,7 +1065,7 @@ export default function App() {
                 <div className="mt-16 pt-10 border-t border-white/10 flex flex-wrap justify-between items-end gap-8">
                   <div className="flex items-center gap-8">
                     <div className="space-y-2">
-                      <div className="text-[10px] uppercase tracking-widest text-white/30 font-bold">Confidence Score</div>
+                      <div className="text-[10px] uppercase tracking-widest text-white/30 font-bold">Confidence Score <Tip text="How confident the council is in this recommendation. Green = strong, Yellow = moderate, Red = uncertain." /></div>
                       <div className="flex items-center gap-3">
                         {finalConfidence !== null ? (
                           <>
@@ -1197,6 +1212,11 @@ export default function App() {
                                           CONF: {Math.round(msg.confidence > 1 ? msg.confidence : msg.confidence * 100)}%
                                         </span>
                                       )}
+                                      {msg.phase === 'clarification' && (
+                                        <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-500/80 border border-purple-500/20">
+                                          Clarifying Qs
+                                        </span>
+                                      )}
                                       {msg.phase === 'blind_draft' && (
                                         <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/5 text-white/40 border border-white/10">
                                           Blind Pass
@@ -1272,7 +1292,7 @@ export default function App() {
             {!activeThreadId && (
               <div className="flex items-center gap-4 text-xs font-mono">
                 <div className="flex items-center gap-2 bg-white/5 rounded-lg p-1 border border-white/10">
-                  <span className="px-2 text-white/40">STAKES:</span>
+                  <span className="px-2 text-white/40 flex items-center">STAKES:<Tip text="How important is this decision? High stakes = more scrutiny." /></span>
                   {(['low', 'medium', 'high'] as const).map(s => (
                     <button
                       key={s}
@@ -1303,13 +1323,34 @@ export default function App() {
                 </button>
               </div>
             )}
-            {isLoading && (liveCost > 0 || liveElapsed > 0) && (
+            {isLoading && (
               <div className="flex items-center justify-center gap-6 py-2 text-[11px] font-mono text-white/40">
-                <span className="flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  {liveElapsed.toFixed(0)}s elapsed
-                </span>
-                <span className="text-emerald-400/70">${liveCost.toFixed(3)} spent</span>
+                {(liveCost > 0 || liveElapsed > 0) && (
+                  <>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                      {liveElapsed.toFixed(0)}s elapsed
+                    </span>
+                    <span className="text-emerald-400/70">${liveCost.toFixed(3)} spent</span>
+                  </>
+                )}
+                <button
+                  onClick={() => {
+                    if (abortRef.current) abortRef.current.abort();
+                    setIsLoading(false);
+                    setIsTyping(false);
+                    // If we have any messages, we can offer to view partial results
+                    if (messages.length > 0) {
+                      setRecap(null); // No synthesis yet
+                      setIsTranscriptExpanded(true);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-400 hover:bg-rose-500/20 transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                  Interrupt
+                  <Tip text="Stops the discussion. You'll see partial results and can ask follow-up questions." />
+                </button>
               </div>
             )}
             <div className="relative group">
@@ -1424,6 +1465,7 @@ export default function App() {
               <div className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/40">The Process</h3>
                 <ol className="space-y-4 list-decimal list-inside marker:text-blue-500 marker:font-bold">
+                  <li><strong>Clarifying Questions:</strong> A few models ask smart questions to understand your situation better before diving in.</li>
                   <li><strong>Blind Draft:</strong> Each selected model answers your question independently, without seeing the others' answers.</li>
                   <li><strong>Targeted Debate:</strong> The models review each other's drafts, point out flaws, and challenge assumptions.</li>
                   <li><strong>Synthesis:</strong> A final step reviews the debate and extracts the recommended action, confidence score, and key caveats.</li>
