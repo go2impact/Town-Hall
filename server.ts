@@ -120,7 +120,7 @@ interface TokenUsage {
 interface ThreadData {
   id: string;
   topic: string;
-  status: "active" | "clarifying" | "awaiting_input" | "complete" | "saved";
+  status: "active" | "clarifying" | "awaiting_clarification" | "awaiting_input" | "complete" | "saved";
   created: string;
   models: string[];
   messages: any[];
@@ -128,6 +128,7 @@ interface ThreadData {
   reversible?: boolean;
   recap?: string;
   systemContext?: string; // Human-injected system prompt / context
+  clarificationAnswers?: string; // User's answers to Round 0 questions
   totalCost: number;  // Running cost in USD
   startTime?: number; // ms timestamp
 }
@@ -259,7 +260,8 @@ async function callModel(key: string, prompt: string, systemOverride?: string): 
 
 // --- Structured Recommendation Engine ---
 
-async function runDiscussion(threadId: string, topic: string, modelKeys: string[]) {
+// ── ROUND 0 ONLY: Ask clarifying questions, then pause for user input ──
+async function runClarificationRound(threadId: string, topic: string, modelKeys: string[]) {
   const models = modelKeys.filter(k => MODELS[k]);
   if (models.length === 0) {
     addMessage(threadId, { type: "status", phase: "error", text: "No valid models selected." });
@@ -273,25 +275,20 @@ async function runDiscussion(threadId: string, topic: string, modelKeys: string[
   thread.startTime = startTime;
   thread.totalCost = 0;
 
-  // Helper to track cost and send running total
   const trackCost = (usage: TokenUsage) => {
     thread.totalCost += usage.cost;
     sendEvent(threadId, { type: "cost_update", totalCost: thread.totalCost, elapsed: (Date.now() - startTime) / 1000 });
   };
 
-  // Inject human system context if provided
   const contextPrefix = thread.systemContext
     ? `\n\nAdditional context from the founder:\n${thread.systemContext}\n\n`
     : "";
 
   // ── ROUND 0: Clarifying Questions ──
-  // Each model asks 1-3 clarifying questions to get more context before analysis
   addMessage(threadId, {
     type: "status", phase: "clarification",
     text: `Round 0 — Models are asking clarifying questions before diving in`,
   });
-
-  const clarifyResults: { key: string; name: string; text: string }[] = [];
 
   const clarifyPromises = models.slice(0, 3).map(async (key) => {
     const cfg = MODELS[key];
@@ -312,7 +309,6 @@ Be specific and brief. Format as a numbered list. Only ask questions that would 
       const response = await callModel(key, clarifyPrompt);
       trackCost(response.usage);
       addMessage(threadId, { type: "message", role: "model", name: key, text: response.text, done: true, phase: "clarification" });
-      clarifyResults.push({ key, name: cfg.name, text: response.text });
     } catch (err: any) {
       addMessage(threadId, { type: "message", role: "model", name: key, text: `[Error: ${err.message}]`, done: true });
     }
@@ -320,15 +316,44 @@ Be specific and brief. Format as a numbered list. Only ask questions that would 
 
   await Promise.all(clarifyPromises);
 
-  // Note: The clarifying questions are shown to the user. The user can always
-  // follow up after the discussion with more context. We don't block the stream
-  // waiting — this keeps the serverless single-request SSE pattern intact.
-  // The questions become part of the discussion record.
+  // ── PAUSE: Wait for user to answer clarifying questions ──
+  thread.status = "awaiting_clarification";
+  addMessage(threadId, {
+    type: "status", phase: "awaiting_clarification",
+    text: "Answer the questions above to improve the analysis, or click Skip to proceed without answers.",
+  });
+}
 
-  // Rebuild contextPrefix (in case systemContext was provided)
-  const fullContextPrefix = thread.systemContext
+// ── ROUNDS 1-3: Full analysis, cross-examination, BS check, synthesis ──
+// Called after user answers clarifying questions (or skips)
+async function runAnalysisRounds(threadId: string, topic: string, modelKeys: string[]) {
+  const models = modelKeys.filter(k => MODELS[k]);
+  if (models.length === 0) {
+    addMessage(threadId, { type: "status", phase: "error", text: "No valid models selected." });
+    return;
+  }
+
+  const thread = threads.get(threadId);
+  if (!thread) return;
+
+  // Resume timing from where we left off, or start fresh
+  const startTime = thread.startTime || Date.now();
+  if (!thread.startTime) thread.startTime = startTime;
+  thread.status = "active";
+
+  const trackCost = (usage: TokenUsage) => {
+    thread.totalCost += usage.cost;
+    sendEvent(threadId, { type: "cost_update", totalCost: thread.totalCost, elapsed: (Date.now() - startTime) / 1000 });
+  };
+
+  // Build context with clarification answers if provided
+  let fullContextPrefix = thread.systemContext
     ? `\n\nAdditional context from the founder:\n${thread.systemContext}\n\n`
     : "";
+
+  if (thread.clarificationAnswers) {
+    fullContextPrefix += `\n\nThe founder answered the clarifying questions:\n${thread.clarificationAnswers}\n\n`;
+  }
 
   // ── ROUND 1: Parallel first-principles analysis ──
   addMessage(threadId, {
@@ -625,6 +650,7 @@ app.post("/start", async (req, res) => {
   const topic = req.body.topic?.trim();
   const models = req.body.models || ["claude", "gemini", "gpt5", "deepseek"];
   const systemContext = req.body.systemContext?.trim();
+  const skipClarification = req.body.skipClarification === true;
   if (!topic) return res.status(400).json({ error: "No topic" });
 
   const tid = generateId();
@@ -645,10 +671,51 @@ app.post("/start", async (req, res) => {
 
   inlineStreamTarget = res;
   try {
-    await runDiscussion(tid, topic, models);
+    if (skipClarification) {
+      // Skip Round 0 — go straight to full analysis
+      await runAnalysisRounds(tid, topic, models);
+    } else {
+      // Run Round 0 only — pause for user input after clarifying questions
+      await runClarificationRound(tid, topic, models);
+    }
   } catch (err: any) {
     console.error("Discussion error:", err);
     addMessage(tid, { type: "status", phase: "error", text: `Discussion error: ${err.message}` });
+  } finally {
+    inlineStreamTarget = null;
+    res.end();
+  }
+});
+
+// ── Resume after clarifying questions answered (or skipped) ──
+app.post("/clarify", async (req, res) => {
+  const tid = req.body.thread_id;
+  const answers = req.body.answers?.trim(); // Optional — empty = skip
+
+  const thread = threads.get(tid);
+  if (!thread) return res.status(404).json({ error: "Thread not found" });
+  if (thread.status !== "awaiting_clarification") {
+    return res.status(400).json({ error: "Thread is not awaiting clarification" });
+  }
+
+  // Store answers for context injection
+  if (answers) {
+    thread.clarificationAnswers = answers;
+    addMessage(tid, { type: "message", role: "human", name: "human", text: answers, done: true, phase: "clarification_response" });
+  }
+
+  // Stream SSE for the remaining rounds
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  inlineStreamTarget = res;
+  try {
+    await runAnalysisRounds(tid, thread.topic, thread.models);
+  } catch (err: any) {
+    console.error("Clarify resume error:", err);
+    addMessage(tid, { type: "status", phase: "error", text: `Resume error: ${err.message}` });
   } finally {
     inlineStreamTarget = null;
     res.end();
@@ -673,22 +740,29 @@ app.post("/api/ask", requireApiKey, async (req, res) => {
   });
 
   if (sync) {
-    await runDiscussion(tid, question, models);
+    // Programmatic API: run full discussion (no pause for clarification)
+    await runClarificationRound(tid, question, models);
     const thread = threads.get(tid);
+    if (thread) thread.status = "active"; // Override awaiting state
+    await runAnalysisRounds(tid, question, models);
+    const threadFinal = threads.get(tid);
     res.json({
       thread_id: tid, status: "complete",
-      recap: thread?.recap || "No recap generated.",
-      messages: thread?.messages?.filter((m: any) => m.done && m.text && !m.typing) || [],
+      recap: threadFinal?.recap || "No recap generated.",
+      messages: threadFinal?.messages?.filter((m: any) => m.done && m.text && !m.typing) || [],
     });
   } else {
-    // Stream SSE inline
+    // Stream SSE inline — also run full for API callers (no UI pause)
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.write(`data: ${JSON.stringify({ type: "thread_created", thread_id: tid })}\n\n`);
     inlineStreamTarget = res;
     try {
-      await runDiscussion(tid, question, models);
+      await runClarificationRound(tid, question, models);
+      const thread = threads.get(tid);
+      if (thread) thread.status = "active";
+      await runAnalysisRounds(tid, question, models);
     } finally {
       inlineStreamTarget = null;
       res.end();

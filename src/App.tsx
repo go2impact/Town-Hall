@@ -59,7 +59,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
-  const [phase, setPhase] = useState<'idle' | 'clarification' | 'awaiting_input' | 'blind_draft' | 'consensus_check' | 'targeted_debate' | 'synthesizing'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'clarification' | 'awaiting_clarification' | 'awaiting_input' | 'blind_draft' | 'consensus_check' | 'targeted_debate' | 'synthesizing' | 'quality_check'>('idle');
   const [currentRound, setCurrentRound] = useState<string | null>(null);
   const [recap, setRecap] = useState<string | null>(null);
   const [finalConfidence, setFinalConfidence] = useState<number | null>(null);
@@ -212,6 +212,11 @@ export default function App() {
 
     if (data.phase !== undefined) {
       setPhase(data.phase);
+      // When clarification round ends, stop loading — user needs to respond
+      if (data.phase === 'awaiting_clarification') {
+        setIsLoading(false);
+        setIsTyping(false);
+      }
       if (!data.text && !data.round && !data.recap) return;
     }
 
@@ -373,8 +378,8 @@ export default function App() {
           }
         }
 
-        // Update thread status to complete in sidebar
-        if (threadId) {
+        // Update thread status — only mark complete if we're past clarification
+        if (threadId && phase !== 'awaiting_clarification') {
           setThreads(prev => prev.map(t =>
             t.id === threadId ? { ...t, status: 'complete' as const } : t
           ));
@@ -451,6 +456,51 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to send human message', err);
+    }
+  };
+
+  // Handle clarifying question answers (or skip)
+  const handleClarify = async (answers?: string) => {
+    if (!activeThreadId) return;
+    setIsLoading(true);
+    setPhase('blind_draft');
+
+    // If user provided answers, show them in the chat
+    if (answers) {
+      setMessages(prev => [...prev, { thread_id: activeThreadId, role: 'human', text: answers, done: true }]);
+    }
+
+    // Abort any previous stream
+    if (abortRef.current) abortRef.current.abort();
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    try {
+      const res = await fetch('/clarify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          thread_id: activeThreadId,
+          answers: answers || '',
+        }),
+        signal: abort.signal,
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        await readSSEStream(res);
+      }
+
+      // Update thread status to complete
+      setThreads(prev => prev.map(t =>
+        t.id === activeThreadId ? { ...t, status: 'complete' as const } : t
+      ));
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error('Failed to resume after clarification', err);
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -1357,6 +1407,55 @@ export default function App() {
                 </button>
               </div>
             )}
+            {/* Clarification answer prompt — shown after Round 0 */}
+            {phase === 'awaiting_clarification' && (
+              <div className="mb-3 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                <div className="flex items-center gap-2 mb-3">
+                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+                  <span className="text-sm font-medium text-amber-300">Answer clarifying questions to improve the analysis</span>
+                </div>
+                <textarea
+                  rows={3}
+                  value={inputText}
+                  onChange={(e) => setInputText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (inputText.trim()) handleClarify(inputText.trim());
+                    }
+                  }}
+                  placeholder="Type your answers here... (or skip to proceed without answering)"
+                  className="w-full bg-[#0a0a0a] border border-[#262626] rounded-xl py-3 px-4 text-sm focus:outline-none focus:border-amber-500/50 transition-all resize-none custom-scrollbar mb-3"
+                />
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      if (inputText.trim()) {
+                        handleClarify(inputText.trim());
+                        setInputText('');
+                      }
+                    }}
+                    disabled={!inputText.trim() || isLoading}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-amber-500/20 border border-amber-500/40 text-amber-300 hover:bg-amber-500/30 disabled:opacity-30 transition-all text-sm font-medium"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Submit Answers & Continue
+                  </button>
+                  <button
+                    onClick={() => {
+                      setInputText('');
+                      handleClarify();
+                    }}
+                    disabled={isLoading}
+                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-white/50 hover:bg-white/10 hover:text-white/70 transition-all text-sm"
+                  >
+                    <ChevronRight className="w-3.5 h-3.5" />
+                    Skip — Proceed without answers
+                  </button>
+                </div>
+              </div>
+            )}
+            {phase !== 'awaiting_clarification' && (
             <div className="relative group">
               <div className="absolute -inset-1 bg-gradient-to-r from-blue-600/20 to-purple-600/20 rounded-[1.5rem] blur opacity-0 group-focus-within:opacity-100 transition duration-500" />
               <textarea
@@ -1370,13 +1469,12 @@ export default function App() {
                   }
                 }}
                 placeholder={
-                  phase === 'awaiting_input' ? "Please answer the clarifying questions to proceed..." :
-                  activeThreadId ? "Address specific models (e.g. 'gemini, gpt - agree?') or follow up..." : 
+                  activeThreadId ? "Address specific models (e.g. 'gemini, gpt - agree?') or follow up..." :
                   "Enter a topic or question to start a Cowork Council..."
                 }
                 className="w-full bg-[#121212] border border-[#262626] rounded-2xl py-4 pl-5 pr-14 text-sm focus:outline-none focus:border-blue-500/50 transition-all resize-none custom-scrollbar relative z-10"
               />
-              <button 
+              <button
                 onClick={activeThreadId ? handleHumanMessage : handleStart}
                 disabled={!inputText.trim() || isLoading}
                 className="absolute right-3 top-1/2 -translate-y-1/2 p-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-white/5 disabled:text-white/20 text-white rounded-xl transition-all z-20 shadow-lg shadow-blue-600/20"
@@ -1384,6 +1482,7 @@ export default function App() {
                 {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
               </button>
             </div>
+            )}
           </div>
           <div className="max-w-4xl mx-auto mt-3 flex items-center justify-between text-[10px] text-white/20 font-mono uppercase tracking-widest">
             <div className="flex gap-4 items-center">
