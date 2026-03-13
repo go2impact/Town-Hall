@@ -246,6 +246,12 @@ export default function App() {
       return;
     }
 
+    // Status messages (type: "status") render as dividers, not as model/moderator messages
+    if (data.type === 'status' && data.text) {
+      setMessages(prev => [...prev, { ...data, role: 'system', text: data.text }]);
+      return;
+    }
+
     if (data.type === 'recap' || data.recap) {
       recapReceivedRef.current = true;
       setRecap(data.text || data.recap);
