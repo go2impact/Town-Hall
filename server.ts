@@ -64,6 +64,9 @@ Think as deeply as you need to. There is no length limit.`;
 // not to individual model identities. Inspired by Du et al. 2023, Liang et al. 2023.
 
 const BULLSHIT_DETECTOR_PROMPT = `You are reviewing the analyses below from multiple AI models.
+Model identities have been anonymized — you're seeing "Model A", "Model B", etc.
+This is intentional. Judge arguments by their quality, not by which model wrote them.
+
 Your ONLY job: find where they're wrong, lazy, or agreeing too easily.
 
 DO NOT add your own analysis of the original question.
@@ -73,7 +76,9 @@ Instead:
 1. If all models agree, ask: is there a plausible scenario where they're ALL wrong? What are they all assuming?
 2. If confidence scores are suspiciously high, challenge them. What evidence would they need to justify that confidence?
 3. If any model changed its position between rounds, was it because of new logic or because of social pressure?
+   Compare each model's Round 1 position to its Round 2 position — flag any shift that isn't justified by a NEW argument.
 4. Call out any vague language, hedging, or "on the other hand" cop-outs.
+5. Check for cascading agreement: did models converge on one position just because a majority held it?
 
 Be specific. Quote the exact claim you're challenging. This is quality control, not participation.`;
 
@@ -376,7 +381,14 @@ Get to the answer. No filler. Think as deeply as needed.`;
     text: "Round 2 — Models reviewing each other's analyses.",
   });
 
-  const allPositions = validR1.map(r => `**${r.name}:** ${r.text}`).join("\n\n");
+  // ── CONFIDENCE HIDING ──
+  // ConfidenceCal (IEEE BigDIA 2024) showed exposed confidence scores between agents
+  // cause cascading over-confidence. We strip confidence lines before sharing between models.
+  const stripConfidence = (text: string) =>
+    text.replace(/\b[Cc]onfidence[:\s]*\d{1,3}\s*(?:\/\s*100|%|out of 100)?[^\n]*/g, "[confidence hidden]")
+        .replace(/\b\d{1,3}\s*\/\s*100\b/g, "[score hidden]");
+
+  const allPositions = validR1.map(r => `**${r.name}:** ${stripConfidence(r.text)}`).join("\n\n");
   const round2Results: { key: string; name: string; text: string }[] = [];
 
   const round2Promises = models.map(async (key) => {
@@ -428,6 +440,14 @@ say so and explain why their counterarguments don't hold up.`;
 
   const allR2 = round2Results.map(r => `**${r.name} (Round 2):** ${r.text}`).join("\n\n");
 
+  // ── ANONYMIZATION for BS Detector ──
+  // Research (Identity Bias in LLM Debate, 2025) shows stripping model identity
+  // markers forces evaluation by argument quality rather than model authority.
+  // We anonymize both rounds before feeding to the quality checker.
+  const anonymousLabels = ["Model A", "Model B", "Model C", "Model D", "Model E"];
+  const anonymizedR1 = validR1.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 1):** ${r.text}`).join("\n\n");
+  const anonymizedR2 = round2Results.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 2):** ${r.text}`).join("\n\n");
+
   // Only run the BS detector if we have enough models for it to be meaningful
   let bsDetectorText = "";
   if (round2Results.length >= 2) {
@@ -438,13 +458,14 @@ say so and explain why their counterarguments don't hold up.`;
 
     addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: "Checking...", done: false });
 
+    // Feed anonymized versions to BS detector — prevents model authority bias
     const bsPrompt = `The user asked: ${topic}
 
-Round 1 (independent analyses):
-${allPositions}
+Round 1 (independent analyses — model identities anonymized):
+${anonymizedR1}
 
-Round 2 (after cross-examination):
-${allR2}
+Round 2 (after cross-examination — model identities anonymized):
+${anonymizedR2}
 
 ${BULLSHIT_DETECTOR_PROMPT}`;
 

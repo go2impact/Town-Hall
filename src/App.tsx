@@ -702,7 +702,7 @@ export default function App() {
                 >
                   <Download className="w-4 h-4" />
                 </button>
-                <button 
+                <button
                   onClick={handleSave}
                   className="p-2 hover:bg-white/5 rounded-md text-white/40 hover:text-white transition-colors"
                   title="Save to Disk"
@@ -711,6 +711,13 @@ export default function App() {
                 </button>
               </>
             )}
+            <button
+              onClick={() => setShowHowItWorks(true)}
+              className="p-2 hover:bg-white/5 rounded-md text-white/40 hover:text-white transition-colors"
+              title="Methodology — How Cowork Council Works"
+            >
+              <BookOpen className="w-4 h-4" />
+            </button>
           </div>
         </header>
 
@@ -1460,34 +1467,66 @@ export default function App() {
                   A <strong>decision engine</strong> that consults multiple frontier AI models simultaneously. Each model gives its honest, unbiased analysis — then they cross-examine each other's work.
                 </p>
                 <p className="text-sm text-white/60">
-                  The value comes from <strong>genuine model diversity</strong> — Claude, GPT-5.4, Grok, Gemini, and DeepSeek are trained differently and genuinely think differently. That's the whole point. When models trained on different data, with different architectures, independently converge on the same answer — you can trust it.
+                  The value comes from <strong>genuine model diversity</strong> — Claude, GPT-5.4, Grok, Gemini, and DeepSeek are trained on different data, with different architectures, by different teams. They genuinely think differently. When these independently-trained systems converge on the same answer, you can trust it. When they diverge, you know the problem is genuinely hard.
                 </p>
                 <p className="text-xs text-white/40">
-                  Based on multi-agent debate research from MIT, Google DeepMind, and others. Studies show this approach reduces hallucinations by 30%+ and improves reasoning accuracy significantly over single-model approaches.
+                  Multi-agent debate is one of the most validated approaches in current AI research. Du et al. (2023, MIT) showed debate reduces factual hallucinations and improves mathematical reasoning. Liang et al. (2023) demonstrated divergent thinking among diverse agents outperforms homogeneous groups. This isn't a novelty — it's applied epistemology.
                 </p>
               </div>
 
               {/* What this IS NOT */}
               <div className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-rose-500/80">What This Is NOT</h3>
-                <ul className="space-y-2 text-sm text-white/60">
-                  <li className="flex gap-2"><span className="text-rose-500">✕</span> <strong>Not roleplay.</strong> Models are not assigned characters or personas. No "Architect" or "Contrarian" — that constrains intelligence.</li>
-                  <li className="flex gap-2"><span className="text-rose-500">✕</span> <strong>Not a panel show.</strong> Research shows role-playing "significantly underperforms" unbiased models (ICLR 2025).</li>
-                  <li className="flex gap-2"><span className="text-rose-500">✕</span> <strong>Not forced consensus.</strong> If models genuinely disagree, the system reports gridlock honestly instead of manufacturing agreement.</li>
+                <p className="text-xs text-white/40 mb-2 italic">If you're contributing to this project, read this section carefully. These are load-bearing design decisions backed by peer-reviewed research, not stylistic preferences.</p>
+                <ul className="space-y-3 text-sm text-white/60">
+                  <li className="flex gap-2"><span className="text-rose-500 mt-0.5">✕</span> <div><strong>Not roleplay.</strong> Models are not assigned characters, personas, or viewpoints. No "Architect," "Contrarian," or "Devil's Advocate." A controlled study at ICLR 2025 found that assigning angel/devil personas to debate agents "significantly underperforms almost any other baseline." Roles constrain the intelligence you're paying for.</div></li>
+                  <li className="flex gap-2"><span className="text-rose-500 mt-0.5">✕</span> <div><strong>Not a panel show.</strong> Model diversity is the dominant driver of debate quality — not structural parameters or role assignment. The "Can LLM Agents Really Debate?" study (2025) showed that weaker models capitulate to incorrect majorities 96.4% of the time when given social roles. We eliminate that by design.</div></li>
+                  <li className="flex gap-2"><span className="text-rose-500 mt-0.5">✕</span> <div><strong>Not forced consensus.</strong> "Talk Isn't Always Cheap" (ICML 2025) found that multi-agent debate can <em>decrease</em> accuracy when models shift from correct answers to incorrect ones to achieve agreement. If models genuinely disagree, we report gridlock honestly. Disagreement is signal, not failure.</div></li>
+                  <li className="flex gap-2"><span className="text-rose-500 mt-0.5">✕</span> <div><strong>Not a vote.</strong> "Peacemaker or Troublemaker" (2025) showed centralized synthesis by a single judge is more resilient to sycophancy than decentralized voting. Our synthesizer reads the full debate trajectory fresh — it doesn't count heads.</div></li>
                 </ul>
               </div>
 
+              {/* The Process */}
               <div className="space-y-4">
-                <h3 className="text-xs font-bold uppercase tracking-widest text-white/40">The Process</h3>
-                <ol className="space-y-4 list-decimal list-inside marker:text-blue-500 marker:font-bold">
-                  <li><strong>Clarifying Questions:</strong> Models ask smart questions to understand your situation before committing to analysis.</li>
-                  <li><strong>Independent Analysis:</strong> Each model answers your question independently — no model sees another's answer.</li>
-                  <li><strong>Cross-Examination:</strong> Models review each other's work. They must cite specific claims they're challenging. They're instructed to stand their ground unless presented with genuinely new logic.</li>
-                  <li><strong>Quality Check:</strong> A separate pass scans for groupthink, lazy agreement, suspiciously high confidence, or models caving to social pressure.</li>
-                  <li><strong>Synthesis:</strong> A different model (not the quality checker) reads everything fresh and extracts the answer. Reports gridlock honestly if models couldn't resolve their disagreement.</li>
+                <h3 className="text-xs font-bold uppercase tracking-widest text-blue-500/80">The Process</h3>
+                <ol className="space-y-5">
+                  <li className="flex gap-3">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">0</span>
+                    <div><strong>Clarifying Questions</strong><br/><span className="text-white/50">Models ask smart questions to understand your situation before committing to analysis. This reduces assumption-driven errors.</span></div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">1</span>
+                    <div><strong>Independent Analysis</strong><br/><span className="text-white/50">Each model answers independently — blind to other models' answers. Every model gets the identical unbiased prompt. No anchoring effects, no conformity bias. This is the most critical step.</span></div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-blue-500/20 text-blue-400 flex items-center justify-center text-xs font-bold">2</span>
+                    <div><strong>Cross-Examination</strong><br/><span className="text-white/50">Models review each other's work and must cite specific claims they're challenging. Each model is explicitly instructed: "Do NOT change your position just because other models disagree. Only update if you see NEW evidence or logic." Research shows 1-2 rounds of debate is optimal — more rounds increase conformity without improving accuracy (FREE-MAD, 2025).</span></div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center text-xs font-bold">⚡</span>
+                    <div><strong>Quality Check (BS Detector)</strong><br/><span className="text-white/50">A separate structural pass — not a participant, not a role. Scans for: groupthink (all models suspiciously agreeing), lazy agreement (positions changing without new evidence), inflated confidence scores, and vague hedging. Model identities are anonymized in this pass to prevent authority bias. Inspired by FREE-MAD's anti-conformity mechanism.</span></div>
+                  </li>
+                  <li className="flex gap-3">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs font-bold">✓</span>
+                    <div><strong>Synthesis</strong><br/><span className="text-white/50">A different model (never the quality checker) reads the full debate trajectory fresh and extracts the answer — not a balanced summary, the actual recommendation. Reports gridlock honestly when models can't resolve disagreement. Confidence scored 0-100 with specific conditions that would change it.</span></div>
+                  </li>
                 </ol>
               </div>
 
+              {/* Independence Guarantees */}
+              <div className="space-y-4">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-amber-500/80">Independence Guarantees</h3>
+                <p className="text-xs text-white/40 mb-2">How we prevent the #1 failure mode in multi-agent systems: groupthink and sycophancy.</p>
+                <ul className="space-y-2 text-xs text-white/60">
+                  <li className="flex gap-2"><span className="text-amber-500">→</span> <strong>Identical base prompt.</strong> Every model gets the same instructions. No model is primed to agree or disagree.</li>
+                  <li className="flex gap-2"><span className="text-amber-500">→</span> <strong>Anti-conformity prompting.</strong> Models are explicitly told to stand their ground. Position changes require citing the new evidence that changed their mind (FREE-MAD, 2025).</li>
+                  <li className="flex gap-2"><span className="text-amber-500">→</span> <strong>Anonymized quality check.</strong> The BS detector sees arguments stripped of model identity markers, forcing evaluation by argument quality rather than model authority (Identity Bias in LLM Debate, 2025).</li>
+                  <li className="flex gap-2"><span className="text-amber-500">→</span> <strong>Separate synthesis judge.</strong> The synthesizer never participated in the debate and never ran the quality check. Fresh eyes, no anchoring (Peacemaker or Troublemaker, 2025).</li>
+                  <li className="flex gap-2"><span className="text-amber-500">→</span> <strong>Gridlock is valid.</strong> Confidence auto-drops to 35 if synthesis detects unresolved disagreement. We don't manufacture consensus.</li>
+                </ul>
+              </div>
+
+              {/* The Models */}
               <div className="space-y-4">
                 <h3 className="text-xs font-bold uppercase tracking-widest text-white/40">The Models</h3>
                 <p className="text-xs text-white/60 mb-2">
@@ -1506,6 +1545,25 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+              </div>
+
+              {/* Research */}
+              <div className="space-y-3 border-t border-white/10 pt-6">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-white/30">Research & References</h3>
+                <ul className="space-y-1.5 text-[11px] text-white/30">
+                  <li>Du et al. (2023) — "Improving Factuality and Reasoning in LLMs through Multi-Agent Debate" — MIT</li>
+                  <li>Liang et al. (2023) — "Encouraging Divergent Thinking in Multi-Agent Debate" — NeurIPS</li>
+                  <li>ICLR 2025 — "Multi-Agent Debate: Angel/Devil Persona Study" — Controlled evaluation of role assignment</li>
+                  <li>FREE-MAD (2025) — Anti-conformity mechanism, trajectory scoring, single-round optimal depth</li>
+                  <li>"Talk Isn't Always Cheap" (2025) — ICML — When debate decreases accuracy via sycophantic agreement</li>
+                  <li>"Peacemaker or Troublemaker" (2025) — Centralized judging vs. decentralized voting resilience</li>
+                  <li>"Can LLM Agents Really Debate?" (2025) — 96.4% capitulation rate of weaker models in social pressure</li>
+                  <li>ConfidenceCal (2024) — IEEE BigDIA — Hidden confidence calibration prevents cascading over-confidence</li>
+                  <li>Identity Bias Anonymization (2025) — Response anonymization as sycophancy mitigation</li>
+                </ul>
+                <p className="text-[10px] text-white/20 mt-2">
+                  This is an open-source project. If you're forking or contributing, please read the research before adding roles, personas, or forced-consensus mechanisms. They have been tried. They underperform.
+                </p>
               </div>
             </div>
           </div>
