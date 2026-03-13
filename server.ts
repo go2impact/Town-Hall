@@ -145,15 +145,18 @@ const generateId = () => {
 // Global SSE subscribers (for the /events endpoint the frontend uses — local dev only)
 const globalClients: express.Response[] = [];
 
-// Inline stream target — the response object for the current /start request
-let inlineStreamTarget: express.Response | null = null;
+// Per-thread stream targets — maps thread ID to the response object streaming its events
+// This replaces the old single global `inlineStreamTarget` which caused cross-talk
+// when Vercel reused a warm function instance for concurrent requests.
+const threadStreamTargets = new Map<string, express.Response>();
 
 function sendEvent(threadId: string, data: any) {
   const payload = `data: ${JSON.stringify({ ...data, thread_id: threadId })}\n\n`;
 
-  // Send to inline stream target (serverless: the /start response itself)
-  if (inlineStreamTarget) {
-    try { inlineStreamTarget.write(payload); } catch {}
+  // Send to this thread's stream target
+  const target = threadStreamTargets.get(threadId);
+  if (target) {
+    try { target.write(payload); } catch {}
   }
 
   // Send to thread-specific subscribers
@@ -249,7 +252,7 @@ async function callGoogle(modelId: string, prompt: string, system: string): Prom
   return { text, usage: { promptTokens, completionTokens, cost } };
 }
 
-async function callModel(key: string, prompt: string, systemOverride?: string, timeoutMs = 60_000): Promise<ModelResponse> {
+async function callModel(key: string, prompt: string, systemOverride?: string, timeoutMs = 90_000): Promise<ModelResponse> {
   const cfg = MODELS[key];
   if (!cfg) throw new Error(`Unknown model: ${key}`);
   const system = systemOverride || BASE_SYSTEM_PROMPT;
@@ -713,7 +716,7 @@ app.post("/start", async (req, res) => {
   // Send thread_id as first event so frontend knows it
   res.write(`data: ${JSON.stringify({ type: "thread_created", thread_id: tid, topic })}\n\n`);
 
-  inlineStreamTarget = res;
+  threadStreamTargets.set(tid, res);
   try {
     if (skipClarification) {
       // Skip Round 0 — go straight to full analysis
@@ -726,7 +729,7 @@ app.post("/start", async (req, res) => {
     console.error("Discussion error:", err);
     addMessage(tid, { type: "status", phase: "error", text: `Discussion error: ${err.message}` });
   } finally {
-    inlineStreamTarget = null;
+    threadStreamTargets.delete(tid);
     res.end();
   }
 });
@@ -764,14 +767,14 @@ app.post("/clarify", async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Accel-Buffering", "no");
 
-  inlineStreamTarget = res;
+  threadStreamTargets.set(tid, res);
   try {
     await runAnalysisRounds(tid, topic, models);
   } catch (err: any) {
     console.error("Clarify resume error:", err);
     addMessage(tid, { type: "status", phase: "error", text: `Resume error: ${err.message}` });
   } finally {
-    inlineStreamTarget = null;
+    threadStreamTargets.delete(tid);
     res.end();
   }
 });
@@ -811,14 +814,14 @@ app.post("/api/ask", requireApiKey, async (req, res) => {
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.write(`data: ${JSON.stringify({ type: "thread_created", thread_id: tid })}\n\n`);
-    inlineStreamTarget = res;
+    threadStreamTargets.set(tid, res);
     try {
       await runClarificationRound(tid, question, models);
       const thread = threads.get(tid);
       if (thread) thread.status = "active";
       await runAnalysisRounds(tid, question, models);
     } finally {
-      inlineStreamTarget = null;
+      threadStreamTargets.delete(tid);
       res.end();
     }
   }
@@ -859,13 +862,13 @@ app.post("/human", async (req, res) => {
 
   addMessage(tid, { type: "message", role: "human", name: "human", text, done: true });
 
-  inlineStreamTarget = res;
+  threadStreamTargets.set(tid, res);
   try {
     await handleFollowup(tid, text, req.body.models);
   } catch (err: any) {
     console.error("Followup error:", err);
   } finally {
-    inlineStreamTarget = null;
+    threadStreamTargets.delete(tid);
     res.end();
   }
 });
