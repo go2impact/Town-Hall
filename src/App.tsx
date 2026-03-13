@@ -500,6 +500,10 @@ export default function App() {
       if (lowerText.includes('gpt')) explicitModels.push(MODELS['GPT-5.4'].id);
       if (lowerText.includes('deepseek')) explicitModels.push(MODELS['DeepSeek V3.2'].id);
       if (lowerText.includes('grok')) explicitModels.push(MODELS['Grok 4'].id);
+      if (lowerText.includes('llama')) explicitModels.push(MODELS['Llama 4 Maverick'].id);
+      if (lowerText.includes('mistral')) explicitModels.push(MODELS['Mistral Large'].id);
+      if (lowerText.includes('qwen')) explicitModels.push(MODELS['Qwen3 235B'].id);
+      if (lowerText.includes('sonnet')) explicitModels.push(MODELS['Claude Sonnet 4.6'].id);
 
       if (explicitModels.length > 0) {
         modelsToAddress = explicitModels;

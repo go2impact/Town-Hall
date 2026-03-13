@@ -8,6 +8,7 @@
     }
   },
   "rewrites": [
+    { "source": "/auth/(.*)", "destination": "/api" },
     { "source": "/api/(.*)", "destination": "/api" },
     { "source": "/start", "destination": "/api" },
     { "source": "/clarify", "destination": "/api" },

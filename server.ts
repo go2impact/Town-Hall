@@ -10,11 +10,124 @@ const PORT = parseInt(process.env.PORT || "3000");
 
 app.use(express.json());
 
-// --- Auth middleware for API endpoints ---
+// --- Login endpoint (must be before auth middleware) ---
+app.post("/auth/login", (req, res) => {
+  const password = req.body.password;
+  if (!SITE_PASSWORD || password === SITE_PASSWORD) {
+    const token = SITE_PASSWORD ? makeSessionToken(SITE_PASSWORD) : "open";
+    res.setHeader("Set-Cookie", `council_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+    res.json({ success: true });
+  } else {
+    res.status(401).json({ error: "Wrong password" });
+  }
+});
+
+// Health check — no auth required
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", models: Object.keys(MODELS).length });
+});
+
+// Apply auth to everything else
+app.use((req, res, next) => {
+  // Skip auth for login endpoint and health check
+  if (req.path === "/auth/login" || req.path === "/api/health") return next();
+  requireAuth(req, res, next);
+});
+
+// --- Auth: simple password gate ---
+const SITE_PASSWORD = process.env.COUNCIL_PASSWORD || "";
 const API_KEY = process.env.COUNCIL_API_KEY || "";
 
+// Generate a simple session token from password
+function makeSessionToken(password: string): string {
+  // Simple hash — not crypto-grade but fine for a password gate
+  let hash = 0;
+  const str = password + "council-salt-2026";
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return "cs_" + Math.abs(hash).toString(36) + "_" + str.length.toString(36);
+}
+
+const validSessionToken = SITE_PASSWORD ? makeSessionToken(SITE_PASSWORD) : "";
+
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!SITE_PASSWORD) return next(); // No password = open (local dev)
+
+  // Check cookie
+  const cookies = req.headers.cookie || "";
+  const tokenMatch = cookies.match(/council_session=([^;]+)/);
+  if (tokenMatch && tokenMatch[1] === validSessionToken) return next();
+
+  // Check API key header (for programmatic access)
+  if (API_KEY) {
+    const provided = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
+    if (provided === API_KEY) return next();
+  }
+
+  // Check query param token (for SSE connections)
+  if (req.query.token === validSessionToken) return next();
+
+  // Not authenticated — if requesting HTML, serve login page; otherwise 401
+  if (req.headers.accept?.includes("text/html") || req.path === "/") {
+    return res.status(401).send(LOGIN_PAGE);
+  }
+  res.status(401).json({ error: "Not authenticated" });
+}
+
+// Login endpoint
+const LOGIN_PAGE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cowork Council — Login</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, -apple-system, sans-serif;
+      display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-box { background: #1a1a2e; border: 1px solid #333; border-radius: 12px; padding: 40px;
+      max-width: 400px; width: 90%; text-align: center; }
+    .login-box h1 { font-size: 24px; margin-bottom: 8px; color: #fff; }
+    .login-box p { color: #888; margin-bottom: 24px; font-size: 14px; }
+    .login-box input { width: 100%; padding: 12px 16px; background: #0a0a0f; border: 1px solid #444;
+      border-radius: 8px; color: #fff; font-size: 16px; margin-bottom: 16px; outline: none; }
+    .login-box input:focus { border-color: #5b9bf5; }
+    .login-box button { width: 100%; padding: 12px; background: #5b9bf5; color: #fff; border: none;
+      border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: 600; }
+    .login-box button:hover { background: #4a8ae5; }
+    .error { color: #f87171; font-size: 14px; margin-bottom: 12px; display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-box">
+    <h1>Cowork Council</h1>
+    <p>Enter the password to continue</p>
+    <div class="error" id="err">Wrong password</div>
+    <form id="f">
+      <input type="password" name="password" placeholder="Password" autofocus autocomplete="current-password" />
+      <button type="submit">Enter</button>
+    </form>
+  </div>
+  <script>
+    document.getElementById('f').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const pw = e.target.password.value;
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw }),
+      });
+      if (res.ok) { window.location.href = '/'; }
+      else { document.getElementById('err').style.display = 'block'; }
+    });
+  </script>
+</body>
+</html>`;
+
 function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
-  if (!API_KEY) return next(); // No key = open (local dev)
+  if (!API_KEY) return next();
   const provided = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
   if (provided === API_KEY) return next();
   res.status(401).json({ error: "Invalid or missing API key" });
@@ -38,6 +151,11 @@ const MODELS: Record<string, ModelConfig> = {
   // Strong tier — near-frontier, great value
   gemini:   { name: "Gemini 3.1 Pro",   color: "#34d399", provider: "openrouter", modelId: "google/gemini-3.1-pro-preview",       tier: "strong" },
   deepseek: { name: "DeepSeek V3.2",    color: "#fb923c", provider: "openrouter", modelId: "deepseek/deepseek-v3.2",             tier: "strong" },
+  // Additional models
+  llama:    { name: "Llama 4 Maverick", color: "#3b82f6", provider: "openrouter", modelId: "meta-llama/llama-4-maverick",         tier: "strong" },
+  mistral:  { name: "Mistral Large",    color: "#f97316", provider: "openrouter", modelId: "mistralai/mistral-large-2411",        tier: "strong" },
+  qwen:     { name: "Qwen3 235B",       color: "#ef4444", provider: "openrouter", modelId: "qwen/qwen3-235b-a22b",               tier: "strong" },
+  sonnet:   { name: "Claude Sonnet 4.6",color: "#8b5cf6", provider: "openrouter", modelId: "anthropic/claude-sonnet-4.6",         tier: "strong" },
 };
 
 // ─── BASE SYSTEM PROMPT ───
@@ -100,6 +218,29 @@ Your job is to extract the ANSWER, not summarize the debate.
 
 Give the answer. Not a balanced summary. Not a debate recap. The answer.`;
 
+// --- Token estimation & truncation ---
+// ~4 chars per token is a safe approximation for English text
+const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
+
+// Max input tokens we'll send to any model (conservative — DeepSeek context is small)
+const MAX_ROUND_INPUT_TOKENS = 30_000;
+
+// Truncate text to fit within a token budget, preserving start and end
+function truncateToTokenBudget(text: string, maxTokens: number): string {
+  const estimated = estimateTokens(text);
+  if (estimated <= maxTokens) return text;
+  const maxChars = maxTokens * 4;
+  const keepStart = Math.floor(maxChars * 0.7);
+  const keepEnd = Math.floor(maxChars * 0.25);
+  return text.slice(0, keepStart) + "\n\n[... truncated for context limits ...]\n\n" + text.slice(-keepEnd);
+}
+
+// Truncate round results to fit within budget, proportionally per model
+function truncateRoundResults(results: { key: string; name: string; text: string }[], totalBudget: number): string {
+  const perModel = Math.floor(totalBudget / Math.max(results.length, 1));
+  return results.map(r => `**${r.name}:** ${truncateToTokenBudget(r.text, perModel)}`).join("\n\n");
+}
+
 // --- Cost tracking ---
 // OpenRouter pricing per 1M tokens (approximate, updated March 2026)
 // Pricing per 1M tokens from OpenRouter (March 2026)
@@ -109,6 +250,10 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "x-ai/grok-4":                        { input: 3, output: 15 },
   "google/gemini-3.1-pro-preview":      { input: 2, output: 12 },
   "deepseek/deepseek-v3.2":             { input: 0.26, output: 0.38 },
+  "meta-llama/llama-4-maverick":        { input: 0.2, output: 0.6 },
+  "mistralai/mistral-large-2411":       { input: 2, output: 6 },
+  "qwen/qwen3-235b-a22b":              { input: 0.7, output: 3 },
+  "anthropic/claude-sonnet-4.6":        { input: 3, output: 15 },
 };
 
 interface TokenUsage {
@@ -184,43 +329,65 @@ interface ModelResponse {
   usage: TokenUsage;
 }
 
-async function callOpenRouter(modelId: string, prompt: string, system: string): Promise<ModelResponse> {
+async function callOpenRouter(modelId: string, prompt: string, system: string, retries = 2): Promise<ModelResponse> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("No OPENROUTER_API_KEY configured");
 
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": process.env.APP_URL || "https://council.cowork.ai",
-      "X-Title": "Cowork Council",
-    },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: 16000,
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: prompt },
-      ],
-    }),
-  });
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          "HTTP-Referer": process.env.APP_URL || "https://council.cowork.ai",
+          "X-Title": "Cowork Council",
+        },
+        body: JSON.stringify({
+          model: modelId,
+          max_tokens: 16000,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: prompt },
+          ],
+        }),
+      });
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`OpenRouter ${resp.status}: ${errText.slice(0, 200)}`);
+      if (resp.status === 429 && attempt < retries) {
+        const wait = (attempt + 1) * 3000;
+        console.log(`  ⏳ ${modelId} rate limited, retrying in ${wait / 1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      if (resp.status >= 500 && attempt < retries) {
+        const wait = (attempt + 1) * 2000;
+        console.log(`  ⏳ ${modelId} server error (${resp.status}), retrying in ${wait / 1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+        continue;
+      }
+
+      if (!resp.ok) {
+        const errText = await resp.text();
+        throw new Error(`OpenRouter ${resp.status}: ${errText.slice(0, 200)}`);
+      }
+
+      const data = await resp.json();
+      const text = data.choices?.[0]?.message?.content || "[No response]";
+
+      const promptTokens = data.usage?.prompt_tokens || 0;
+      const completionTokens = data.usage?.completion_tokens || 0;
+      const pricing = MODEL_PRICING[modelId] || { input: 5, output: 15 };
+      const cost = (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
+
+      return { text, usage: { promptTokens, completionTokens, cost } };
+    } catch (err: any) {
+      if (attempt === retries) throw err;
+      console.log(`  ⏳ ${modelId} failed (${err.message}), retrying...`);
+      await new Promise(r => setTimeout(r, (attempt + 1) * 2000));
+    }
   }
-
-  const data = await resp.json();
-  const text = data.choices?.[0]?.message?.content || "[No response]";
-
-  // Extract token usage and calculate cost
-  const promptTokens = data.usage?.prompt_tokens || 0;
-  const completionTokens = data.usage?.completion_tokens || 0;
-  const pricing = MODEL_PRICING[modelId] || { input: 5, output: 15 };
-  const cost = (promptTokens * pricing.input + completionTokens * pricing.output) / 1_000_000;
-
-  return { text, usage: { promptTokens, completionTokens, cost } };
+  throw new Error(`${modelId} failed after ${retries + 1} attempts`);
 }
 
 async function callGoogle(modelId: string, prompt: string, system: string): Promise<ModelResponse> {
@@ -450,7 +617,12 @@ Get to the answer. No filler. Think as deeply as needed.`;
     text.replace(/\b[Cc]onfidence[:\s]*\d{1,3}\s*(?:\/\s*100|%|out of 100)?[^\n]*/g, "[confidence hidden]")
         .replace(/\b\d{1,3}\s*\/\s*100\b/g, "[score hidden]");
 
-  const allPositions = validR1.map(r => `**${r.name}:** ${stripConfidence(r.text)}`).join("\n\n");
+  // Token-budget-aware: truncate Round 1 results so Round 2 prompts don't overflow
+  const r1Budget = Math.floor(MAX_ROUND_INPUT_TOKENS * 0.6); // 60% of budget for R1 content
+  const allPositions = truncateRoundResults(
+    validR1.map(r => ({ ...r, text: stripConfidence(r.text) })),
+    r1Budget
+  );
   const round2Results: { key: string; name: string; text: string }[] = [];
 
   const round2Promises = models.map(async (key) => {
@@ -459,12 +631,13 @@ Get to the answer. No filler. Think as deeply as needed.`;
 
     addMessage(threadId, { type: "message", role: "model", name: key, text: "Reviewing...", done: false });
 
+    const ownR1Text = ownR1 ? truncateToTokenBudget(ownR1.text, 3000) : "";
     const prompt = `The user asked: ${topic}${fullContextPrefix}
 
 All Round 1 analyses from different models:
 ${allPositions}
 
-${ownR1 ? `Your Round 1 analysis was: ${ownR1.text}` : ""}
+${ownR1Text ? `Your Round 1 analysis was: ${ownR1Text}` : ""}
 
 Review the other models' analyses:
 1. Where did another model identify something you missed? Acknowledge it specifically.
@@ -490,6 +663,12 @@ say so and explain why their counterarguments don't hold up.`;
 
   await Promise.all(round2Promises);
 
+  // Validate Round 2 — if all models failed, fall through to synthesis with R1 data only
+  if (round2Results.length === 0) {
+    console.log("  ⚠️ All models failed in Round 2 — skipping to synthesis with Round 1 data only");
+    addMessage(threadId, { type: "status", phase: "quality_check", text: "Round 2 failed — synthesizing from Round 1 data." });
+  }
+
   // ── ROUND 2.5: Bullshit Detector ──
   // A separate structural pass — NOT a role, NOT a participant.
   // Uses the highest-tier model to check for groupthink, lazy agreement, or weak reasoning.
@@ -500,15 +679,25 @@ say so and explain why their counterarguments don't hold up.`;
     return aTier - bTier;
   })[0] || "claude";
 
-  const allR2 = round2Results.map(r => `**${r.name} (Round 2):** ${r.text}`).join("\n\n");
+  // Token-budget-aware Round 2 aggregation
+  const r2Budget = Math.floor(MAX_ROUND_INPUT_TOKENS * 0.5);
+  const allR2 = truncateRoundResults(
+    round2Results.map(r => ({ ...r, name: `${r.name} (Round 2)` })),
+    r2Budget
+  );
 
   // ── ANONYMIZATION for BS Detector ──
-  // Research (Identity Bias in LLM Debate, 2025) shows stripping model identity
-  // markers forces evaluation by argument quality rather than model authority.
-  // We anonymize both rounds before feeding to the quality checker.
-  const anonymousLabels = ["Model A", "Model B", "Model C", "Model D", "Model E"];
-  const anonymizedR1 = validR1.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 1):** ${r.text}`).join("\n\n");
-  const anonymizedR2 = round2Results.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 2):** ${r.text}`).join("\n\n");
+  const anonymousLabels = ["Model A", "Model B", "Model C", "Model D", "Model E", "Model F", "Model G", "Model H", "Model I"];
+  const anonR1Budget = Math.floor(MAX_ROUND_INPUT_TOKENS * 0.4);
+  const anonR2Budget = Math.floor(MAX_ROUND_INPUT_TOKENS * 0.4);
+  const anonymizedR1 = truncateRoundResults(
+    validR1.map((r, i) => ({ ...r, key: r.key, name: `${anonymousLabels[i] || `Model ${i+1}`} (Round 1)` })),
+    anonR1Budget
+  );
+  const anonymizedR2 = truncateRoundResults(
+    round2Results.map((r, i) => ({ ...r, key: r.key, name: `${anonymousLabels[i] || `Model ${i+1}`} (Round 2)` })),
+    anonR2Budget
+  );
 
   // Only run the BS detector if we have enough models and reasonable time remaining.
   // Vercel has a 300s limit — only skip BS if we're really close to the wall.
@@ -580,12 +769,22 @@ ${bsDetectorText ? `Quality Check (bullshit detector):\n${bsDetectorText}\n` : "
 
 ${SYNTHESIS_PROMPT_TEMPLATE}`;
 
+  // Validate synthesis prompt isn't too huge
+  const synthTokenEst = estimateTokens(synthPrompt);
+  if (synthTokenEst > MAX_ROUND_INPUT_TOKENS) {
+    console.log(`  ⚠️ Synthesis prompt ${synthTokenEst} tokens — over budget, truncating...`);
+  }
+
   let synthesisText = "";
   let confidence = 75;
   let consensusType: "unanimous" | "additive" | "divergent" = "additive";
 
   try {
-    const response = await callModel(synthModelKey, synthPrompt, SYNTHESIS_PROMPT_TEMPLATE);
+    // Use remaining time budget, not hardcoded 240s
+    const synthElapsed = (Date.now() - startTime) / 1000;
+    const synthTimeoutMs = Math.max(60_000, (295 - synthElapsed) * 1000);
+    console.log(`  ⏱️ Synthesis timeout: ${(synthTimeoutMs / 1000).toFixed(0)}s (${synthElapsed.toFixed(0)}s elapsed)`);
+    const response = await callModel(synthModelKey, synthPrompt, SYNTHESIS_PROMPT_TEMPLATE, synthTimeoutMs);
     synthesisText = response.text;
     trackCost(response.usage);
 
@@ -1144,16 +1343,6 @@ app.get("/api/messages/:tid", (req, res) => {
     status: thread.status,
     total: thread.messages.filter((m: any) => !m.typing && !m.ping).length,
     recap: thread.recap,
-  });
-});
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    models: Object.keys(MODELS),
-    threads: threads.size,
-    hasOpenRouter: !!process.env.OPENROUTER_API_KEY,
-    hasGoogle: !!(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY),
   });
 });
 
