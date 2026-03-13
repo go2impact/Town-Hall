@@ -113,6 +113,8 @@ export default function App() {
   const discussionAreaRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const recapReceivedRef = useRef(false);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages; // Always keep ref in sync
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -354,6 +356,7 @@ export default function App() {
     const abort = new AbortController();
     abortRef.current = abort;
 
+    let startThreadId: string | null = null;
     try {
       const body = {
         topic,
@@ -398,6 +401,7 @@ export default function App() {
                 const data = JSON.parse(line.slice(6));
                 if (data.type === 'thread_created' && data.thread_id) {
                   threadId = data.thread_id;
+                  startThreadId = threadId;
                   setActiveThreadId(threadId);
                   // Add thread to sidebar
                   setThreads(prev => [{
@@ -439,20 +443,9 @@ export default function App() {
       }
     } finally {
       setIsLoading(false);
-      // If stream ended without a recap event but synthesis IS in the messages, promote it to recap
-      if (!recapReceivedRef.current) {
-        setMessages(prev => {
-          const synthMsg = [...prev].reverse().find(m => (m as any).synthesis === true);
-          if (synthMsg?.text && synthMsg.text.length > 100) {
-            // We got the synthesis but the recap event was lost (Vercel timeout)
-            recapReceivedRef.current = true;
-            setRecap(synthMsg.text);
-            setPhase('idle');
-            return prev;
-          }
-          setPhase('idle');
-          return prev;
-        });
+      // If stream ended without recap, try standalone synthesis with fresh 300s budget
+      if (!recapReceivedRef.current && startThreadId) {
+        await attemptSynthesisRecovery(startThreadId);
       }
     }
   };
@@ -517,6 +510,104 @@ export default function App() {
     }
   };
 
+  // ── Auto-synthesize: if stream dies before recap, call /synthesize with its own 300s budget ──
+  const attemptSynthesisRecovery = async (threadId: string) => {
+    if (recapReceivedRef.current) return; // Already got recap
+
+    // First check if we already have a complete synthesis message (recap event lost)
+    const currentMessages = messagesRef.current; // use ref for fresh state
+    const synthMsg = [...currentMessages].reverse().find(m => (m as any).synthesis === true);
+    if (synthMsg?.text && synthMsg.text.length > 200) {
+      // Synthesis completed but recap event was lost — just promote it
+      recapReceivedRef.current = true;
+      setRecap(synthMsg.text);
+      setPhase('idle');
+      return;
+    }
+
+    // Extract round data from messages to feed standalone synthesis endpoint
+    const modelMsgs = currentMessages.filter(m => m.role === 'model' && m.done && m.text && !m.text.startsWith('[Error'));
+    const statusMsgs = currentMessages.filter(m => m.role === 'system');
+
+    // Find phase boundaries
+    const r1Start = statusMsgs.findIndex(m => m.text?.includes('Round 1'));
+    const r2Start = statusMsgs.findIndex(m => m.text?.includes('Round 2'));
+    const bsStart = statusMsgs.findIndex(m => m.text?.includes('Quality check'));
+    const synthStart = statusMsgs.findIndex(m => m.text?.includes('Synthesis'));
+
+    // Collect round 1 model responses (messages between R1 and R2 status markers)
+    let round1Text = '';
+    let round2Text = '';
+    let bsText = '';
+
+    // Simple approach: use message names and positions
+    const r1Models = modelMsgs.filter(m => {
+      const idx = currentMessages.indexOf(m);
+      const r2StatusIdx = currentMessages.findIndex(m2 => m2.role === 'system' && m2.text?.includes('Round 2'));
+      return r2StatusIdx > 0 ? idx < r2StatusIdx : false;
+    });
+    round1Text = r1Models.map(m => `**${m.name}:** ${m.text}`).join('\n\n');
+
+    const r2Models = modelMsgs.filter(m => {
+      const idx = currentMessages.indexOf(m);
+      const r2StatusIdx = currentMessages.findIndex(m2 => m2.role === 'system' && m2.text?.includes('Round 2'));
+      const bsStatusIdx = currentMessages.findIndex(m2 => m2.role === 'system' && (m2.text?.includes('Quality check') || m2.text?.includes('Synthesis')));
+      return r2StatusIdx > 0 && idx > r2StatusIdx && (bsStatusIdx > 0 ? idx < bsStatusIdx : true);
+    });
+    round2Text = r2Models.map(m => `**${m.name}:** ${m.text}`).join('\n\n');
+
+    const bsMsg = modelMsgs.find(m => m.name === 'bs-detector');
+    bsText = bsMsg?.text && !bsMsg.text.startsWith('[') ? bsMsg.text : '';
+
+    if (!round1Text) {
+      // No round data — can't synthesize
+      setPhase('idle');
+      return;
+    }
+
+    console.log('[Council] Rounds complete but synthesis missing/truncated — calling /synthesize endpoint');
+
+    // Call /synthesize with its own fresh 300s budget
+    try {
+      setIsLoading(true);
+      setPhase('synthesizing');
+      const activeThread = threads.find(t => t.id === threadId);
+      const res = await fetch('/synthesize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          thread_id: threadId,
+          topic: activeThread?.topic || '',
+          models: Array.from(selectedModels).map(m => MODELS[m].id),
+          round1: round1Text,
+          round2: round2Text,
+          bsDetector: bsText,
+        }),
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/event-stream')) {
+        await readSSEStream(res);
+      }
+    } catch (err: any) {
+      console.error('[Council] Synthesis recovery failed:', err);
+    } finally {
+      setIsLoading(false);
+      if (!recapReceivedRef.current) {
+        // Last-ditch: check if synthesis message arrived this time
+        setMessages(prev => {
+          const s = [...prev].reverse().find(m => (m as any).synthesis === true);
+          if (s?.text && s.text.length > 100) {
+            recapReceivedRef.current = true;
+            setRecap(s.text);
+          }
+          setPhase('idle');
+          return prev;
+        });
+      }
+    }
+  };
+
   // Detect if a thread died mid-stream and can be resumed
   const threadIsStalled = activeThreadId && messages.length > 0 && !recap && !isLoading && phase === 'idle';
 
@@ -578,19 +669,9 @@ export default function App() {
       }
     } finally {
       setIsLoading(false);
-      if (!recapReceivedRef.current) {
-        // Check if synthesis arrived but recap event was lost (Vercel timeout)
-        setMessages(prev => {
-          const synthMsg = [...prev].reverse().find(m => (m as any).synthesis === true);
-          if (synthMsg?.text && synthMsg.text.length > 100) {
-            recapReceivedRef.current = true;
-            setRecap(synthMsg.text);
-            setPhase('idle');
-            return prev;
-          }
-          setPhase('idle');
-          return prev;
-        });
+      // If stream ended without recap, try standalone synthesis with fresh 300s budget
+      if (!recapReceivedRef.current && activeThreadId) {
+        await attemptSynthesisRecovery(activeThreadId);
       }
     }
   };

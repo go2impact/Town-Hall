@@ -17,6 +17,7 @@
     { "source": "/stream/(.*)", "destination": "/api" },
     { "source": "/thread/(.*)", "destination": "/api" },
     { "source": "/threads", "destination": "/api" },
-    { "source": "/followup", "destination": "/api" }
+    { "source": "/followup", "destination": "/api" },
+    { "source": "/synthesize", "destination": "/api" }
   ]
 }

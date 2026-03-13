@@ -636,6 +636,100 @@ ${SYNTHESIS_PROMPT_TEMPLATE}`;
   addMessage(threadId, { type: "status", phase: "complete", text: "Analysis complete. Type to ask follow-ups.", done: true });
 }
 
+// ── Standalone synthesis function — can be called from its own endpoint ──
+async function runSynthesisOnly(threadId: string, topic: string, modelKeys: string[], roundData: { round1: string; round2: string; bsDetector: string }) {
+  const thread = threads.get(threadId);
+  if (!thread) return;
+
+  const startTime = Date.now();
+  const models = modelKeys.filter(k => MODELS[k]);
+
+  const trackCost = (usage: TokenUsage) => {
+    thread.totalCost += usage.cost;
+    sendEvent(threadId, { type: "cost_update", totalCost: thread.totalCost, elapsed: (Date.now() - startTime) / 1000 });
+  };
+
+  const tierPriority = ["frontier", "strong"];
+  const synthCandidates = [...models].sort((a, b) => {
+    const aTier = tierPriority.indexOf(MODELS[a]?.tier || "strong");
+    const bTier = tierPriority.indexOf(MODELS[b]?.tier || "strong");
+    return aTier - bTier;
+  });
+  const synthModelKey = synthCandidates[0] || "claude";
+
+  addMessage(threadId, {
+    type: "status", phase: "synthesizing",
+    text: `Synthesis — ${MODELS[synthModelKey]?.name || synthModelKey} extracting the recommendation.`,
+  });
+
+  const synthPrompt = `The user asked: ${topic}
+
+Round 1 (independent analyses):
+${roundData.round1}
+
+Round 2 (cross-examination):
+${roundData.round2}
+
+${roundData.bsDetector ? `Quality Check (bullshit detector):\n${roundData.bsDetector}\n` : ""}
+
+${SYNTHESIS_PROMPT_TEMPLATE}`;
+
+  let synthesisText = "";
+  let confidence = 75;
+  let consensusType: "unanimous" | "additive" | "divergent" = "additive";
+
+  try {
+    const response = await callModel(synthModelKey, synthPrompt, SYNTHESIS_PROMPT_TEMPLATE);
+    synthesisText = response.text;
+    trackCost(response.usage);
+
+    const confMatch = synthesisText.match(/\b(\d{1,3})(?:\/100|%|\s*(?:out of|\/)\s*100)\b/);
+    if (confMatch) {
+      confidence = Math.min(100, Math.max(0, parseInt(confMatch[1])));
+    } else if (synthesisText.toLowerCase().includes("gridlock") || synthesisText.toLowerCase().includes("could not resolve")) {
+      confidence = 35;
+      consensusType = "divergent";
+    } else if (synthesisText.includes("VERY HIGH") || /\b9[0-9]\b/.test(synthesisText)) {
+      confidence = 92;
+    } else if (synthesisText.includes("HIGH") || /\b8[0-9]\b/.test(synthesisText)) {
+      confidence = 82;
+    } else if (synthesisText.includes("MEDIUM") || /\b[56][0-9]\b/.test(synthesisText)) {
+      confidence = 62;
+    } else if (synthesisText.includes("LOW") || /\b[34][0-9]\b/.test(synthesisText)) {
+      confidence = 40;
+    }
+
+    if (synthesisText.toLowerCase().includes("unanimous") || synthesisText.toLowerCase().includes("all models agree")) consensusType = "unanimous";
+    else if (synthesisText.toLowerCase().includes("divergent") || synthesisText.toLowerCase().includes("gridlock") || synthesisText.toLowerCase().includes("could not resolve")) consensusType = "divergent";
+
+    addMessage(threadId, { type: "message", role: "model", name: "moderator", text: synthesisText, done: true, synthesis: true });
+  } catch (err: any) {
+    synthesisText = `[Synthesis error: ${err.message}]`;
+    addMessage(threadId, { type: "message", role: "model", name: "moderator", text: synthesisText, done: true });
+  }
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+  sendEvent(threadId, {
+    type: "recap",
+    text: synthesisText,
+    confidence,
+    isConsensus: consensusType,
+    recommendation: "See synthesis above.",
+    keyCaveat: "Review confidence assessment.",
+    nextStep: "Follow the Next Actions in the synthesis.",
+    elapsedTime: `${elapsed}s`,
+    estimatedCost: `$${thread.totalCost.toFixed(3)}`,
+  });
+
+  if (thread) {
+    thread.status = "complete";
+    thread.recap = synthesisText;
+  }
+
+  addMessage(threadId, { type: "status", phase: "complete", text: "Analysis complete. Type to ask follow-ups.", done: true });
+}
+
 async function handleFollowup(threadId: string, humanText: string, modelKeys?: string[]) {
   const thread = threads.get(threadId);
   if (!thread) return;
@@ -728,6 +822,44 @@ app.post("/start", async (req, res) => {
   } catch (err: any) {
     console.error("Discussion error:", err);
     addMessage(tid, { type: "status", phase: "error", text: `Discussion error: ${err.message}` });
+  } finally {
+    threadStreamTargets.delete(tid);
+    res.end();
+  }
+});
+
+// ── Standalone synthesis endpoint — gets its own fresh 300s Vercel budget ──
+app.post("/synthesize", async (req, res) => {
+  const tid = req.body.thread_id;
+  const topic = req.body.topic?.trim();
+  const models = req.body.models || ["claude"];
+  const round1 = req.body.round1 || "";
+  const round2 = req.body.round2 || "";
+  const bsDetector = req.body.bsDetector || "";
+
+  if (!tid || !topic) return res.status(400).json({ error: "Missing thread_id or topic" });
+
+  // Reconstruct thread if needed (serverless: different invocation)
+  let thread = threads.get(tid);
+  if (!thread) {
+    thread = {
+      id: tid, topic, status: "active", created: new Date().toISOString(),
+      models, messages: [], totalCost: 0,
+    };
+    threads.set(tid, thread);
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  threadStreamTargets.set(tid, res);
+  try {
+    await runSynthesisOnly(tid, topic, models, { round1, round2, bsDetector });
+  } catch (err: any) {
+    console.error("Synthesis endpoint error:", err);
+    addMessage(tid, { type: "status", phase: "error", text: `Synthesis error: ${err.message}` });
   } finally {
     threadStreamTargets.delete(tid);
     res.end();
