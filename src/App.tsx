@@ -110,6 +110,7 @@ export default function App() {
   const [templateContents, setTemplateContents] = useState<Record<string, string>>(DEFAULT_TEMPLATES);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const discussionAreaRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const recapReceivedRef = useRef(false);
 
@@ -120,6 +121,13 @@ export default function App() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isTyping]);
+
+  // When recap arrives, scroll to the top so user sees the Decision Summary card
+  useEffect(() => {
+    if (recap) {
+      discussionAreaRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }, [recap]);
 
   // Load threads from localStorage (serverless has no persistent memory)
   useEffect(() => {
@@ -855,7 +863,7 @@ export default function App() {
         </header>
 
         {/* Discussion Area */}
-        <div className="flex-1 overflow-y-auto custom-scrollbar">
+        <div ref={discussionAreaRef} className="flex-1 overflow-y-auto custom-scrollbar">
           {!activeThreadId && (
             <div className="max-w-4xl mx-auto py-16 px-8 space-y-12">
               <div className="space-y-4 text-center">
