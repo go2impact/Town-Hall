@@ -257,7 +257,7 @@ async function callModel(key: string, prompt: string, systemOverride?: string): 
     : callOpenRouter(cfg.modelId, prompt, system);
 }
 
-// --- Structured Decision Engine ---
+// --- Structured Recommendation Engine ---
 
 async function runDiscussion(threadId: string, topic: string, modelKeys: string[]) {
   const models = modelKeys.filter(k => MODELS[k]);
