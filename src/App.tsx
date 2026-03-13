@@ -111,6 +111,7 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const recapReceivedRef = useRef(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -246,6 +247,7 @@ export default function App() {
     }
 
     if (data.type === 'recap' || data.recap) {
+      recapReceivedRef.current = true;
       setRecap(data.text || data.recap);
       if (data.confidence !== undefined) setFinalConfidence(data.confidence > 1 ? data.confidence / 100 : data.confidence);
       if (data.isConsensus !== undefined) setIsConsensus(data.isConsensus);
@@ -324,6 +326,7 @@ export default function App() {
     setIsLoading(true);
     setMessages([]);
     setRecap(null);
+    recapReceivedRef.current = false;
     setIsTranscriptExpanded(true);
     setPhase('blind_draft');
     setInputText('');
@@ -422,6 +425,10 @@ export default function App() {
       }
     } finally {
       setIsLoading(false);
+      // If stream ended without a recap (timeout/crash), reset phase so stall detection shows Resume button
+      if (!recapReceivedRef.current) {
+        setPhase('idle');
+      }
     }
   };
 
@@ -502,6 +509,7 @@ export default function App() {
     if (!activeThreadId) return;
     setIsLoading(true);
     setPhase('blind_draft');
+    recapReceivedRef.current = false;
 
     // If user provided answers, show them in the chat
     if (answers) {
@@ -545,6 +553,9 @@ export default function App() {
       }
     } finally {
       setIsLoading(false);
+      if (!recapReceivedRef.current) {
+        setPhase('idle'); // Trigger stall detection → Resume button
+      }
     }
   };
 
@@ -1288,7 +1299,11 @@ export default function App() {
                             >
                               <div className="flex items-center justify-between mb-3">
                                 <div className="flex items-center gap-3">
-                                  {msg.role === 'model' && modelInfo ? (
+                                  {msg.role === 'human' ? (
+                                    <span className="text-xs font-mono font-bold uppercase tracking-wider text-blue-400">
+                                      YOU
+                                    </span>
+                                  ) : msg.role === 'model' && modelInfo ? (
                                     <>
                                       <span className="text-xs font-mono font-bold uppercase tracking-wider" style={{ color: modelInfo.color }}>
                                         {modelDisplayName || msg.name}

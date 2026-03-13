@@ -249,13 +249,21 @@ async function callGoogle(modelId: string, prompt: string, system: string): Prom
   return { text, usage: { promptTokens, completionTokens, cost } };
 }
 
-async function callModel(key: string, prompt: string, systemOverride?: string): Promise<ModelResponse> {
+async function callModel(key: string, prompt: string, systemOverride?: string, timeoutMs = 60_000): Promise<ModelResponse> {
   const cfg = MODELS[key];
   if (!cfg) throw new Error(`Unknown model: ${key}`);
   const system = systemOverride || BASE_SYSTEM_PROMPT;
-  return cfg.provider === "google"
-    ? callGoogle(cfg.modelId, prompt, system)
-    : callOpenRouter(cfg.modelId, prompt, system);
+
+  // Race against a timeout so one slow model can't kill the whole session
+  const result = await Promise.race([
+    cfg.provider === "google"
+      ? callGoogle(cfg.modelId, prompt, system)
+      : callOpenRouter(cfg.modelId, prompt, system),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${cfg.name} timed out after ${timeoutMs / 1000}s`)), timeoutMs)
+    ),
+  ]);
+  return result;
 }
 
 // --- Structured Recommendation Engine ---
@@ -498,9 +506,13 @@ say so and explain why their counterarguments don't hold up.`;
   const anonymizedR1 = validR1.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 1):** ${r.text}`).join("\n\n");
   const anonymizedR2 = round2Results.map((r, i) => `**${anonymousLabels[i] || `Model ${i+1}`} (Round 2):** ${r.text}`).join("\n\n");
 
-  // Only run the BS detector if we have enough models for it to be meaningful
+  // Only run the BS detector if we have enough models AND enough time budget remaining.
+  // Vercel has a 300s limit — we need ~60s for synthesis, so skip BS if >220s elapsed.
   let bsDetectorText = "";
-  if (round2Results.length >= 2) {
+  const elapsedSoFar = (Date.now() - startTime) / 1000;
+  const timeBudgetOk = elapsedSoFar < 220;
+
+  if (round2Results.length >= 2 && timeBudgetOk) {
     addMessage(threadId, {
       type: "status", phase: "quality_check",
       text: "Quality check — Scanning for groupthink, weak reasoning, or lazy agreement.",
@@ -520,13 +532,20 @@ ${anonymizedR2}
 ${BULLSHIT_DETECTOR_PROMPT}`;
 
     try {
-      const bsResponse = await callModel(bsDetectorKey, bsPrompt, BULLSHIT_DETECTOR_PROMPT);
+      // Give BS detector max 45s — leave time for synthesis
+      const bsTimeoutMs = Math.min(45_000, Math.max(15_000, (270 - elapsedSoFar) * 1000));
+      const bsResponse = await callModel(bsDetectorKey, bsPrompt, BULLSHIT_DETECTOR_PROMPT, bsTimeoutMs);
       bsDetectorText = bsResponse.text;
       trackCost(bsResponse.usage);
       addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: bsDetectorText, done: true, phase: "quality_check" });
     } catch (err: any) {
-      addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: `[Quality check error: ${err.message}]`, done: true });
+      // BS detector is optional — if it times out, continue to synthesis
+      console.log(`  ⚠️ BS detector failed: ${err.message} — skipping to synthesis`);
+      addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: `[Quality check skipped: ${err.message}]`, done: true });
     }
+  } else if (round2Results.length >= 2 && !timeBudgetOk) {
+    console.log(`  ⚠️ Skipping BS detector — ${elapsedSoFar.toFixed(0)}s elapsed, need time for synthesis`);
+    addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: "[Quality check skipped — time budget exceeded, proceeding to synthesis]", done: true });
   }
 
   // ── ROUND 3: Synthesis and Recommendation ──
