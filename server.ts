@@ -1,21 +1,56 @@
 import express from "express";
 import path from "path";
+import crypto from "crypto";
 import dotenv from "dotenv";
-import { put, list, head, del } from "@vercel/blob";
+import { put, list } from "@vercel/blob";
 
 dotenv.config();
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3000");
 
-app.use(express.json());
+app.use(express.json({ limit: "100kb" }));
+
+// --- Auth: simple password gate ---
+const SITE_PASSWORD = process.env.COUNCIL_PASSWORD || "";
+const API_KEY = process.env.COUNCIL_API_KEY || "";
+// SESSION_SECRET must be stable across serverless invocations — derive from password if not set
+const SESSION_SECRET = process.env.SESSION_SECRET ||
+  (SITE_PASSWORD ? crypto.createHash("sha256").update("council-session-secret-" + SITE_PASSWORD).digest("hex") : crypto.randomBytes(32).toString("hex"));
+
+// Cryptographically secure session tokens — random per login, HMAC-signed
+function createSessionToken(): string {
+  const nonce = crypto.randomBytes(16).toString("hex");
+  const sig = crypto.createHmac("sha256", SESSION_SECRET).update(nonce).digest("hex");
+  return `cs_${nonce}_${sig}`;
+}
+
+function verifySessionToken(token: string): boolean {
+  const parts = token.match(/^cs_([a-f0-9]{32})_([a-f0-9]{64})$/);
+  if (!parts) return false;
+  const expected = crypto.createHmac("sha256", SESSION_SECRET).update(parts[1]).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(parts[2], "hex"), Buffer.from(expected, "hex"));
+}
 
 // --- Login endpoint (must be before auth middleware) ---
 app.post("/auth/login", (req, res) => {
   const password = req.body.password;
-  if (!SITE_PASSWORD || password === SITE_PASSWORD) {
-    const token = SITE_PASSWORD ? makeSessionToken(SITE_PASSWORD) : "open";
-    res.setHeader("Set-Cookie", `council_session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`);
+  if (!SITE_PASSWORD) {
+    // No password set — open mode (local dev)
+    res.json({ success: true });
+    return;
+  }
+  if (typeof password !== "string") {
+    return res.status(400).json({ error: "Password must be a string" });
+  }
+  // HMAC comparison — constant time regardless of password length
+  const pwHash = crypto.createHmac("sha256", SESSION_SECRET).update(password).digest();
+  const expectedHash = crypto.createHmac("sha256", SESSION_SECRET).update(SITE_PASSWORD).digest();
+  if (crypto.timingSafeEqual(pwHash, expectedHash)) {
+    const token = createSessionToken();
+    const isProduction = process.env.VERCEL || process.env.NODE_ENV === "production";
+    const securePart = isProduction ? " Secure;" : "";
+    res.setHeader("Set-Cookie", `council_session=${token}; Path=/; HttpOnly; SameSite=Lax;${securePart} Max-Age=604800`);
     res.json({ success: true });
   } else {
     res.status(401).json({ error: "Wrong password" });
@@ -34,41 +69,27 @@ app.use((req, res, next) => {
   requireAuth(req, res, next);
 });
 
-// --- Auth: simple password gate ---
-const SITE_PASSWORD = process.env.COUNCIL_PASSWORD || "";
-const API_KEY = process.env.COUNCIL_API_KEY || "";
-
-// Generate a simple session token from password
-function makeSessionToken(password: string): string {
-  // Simple hash — not crypto-grade but fine for a password gate
-  let hash = 0;
-  const str = password + "council-salt-2026";
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return "cs_" + Math.abs(hash).toString(36) + "_" + str.length.toString(36);
-}
-
-const validSessionToken = SITE_PASSWORD ? makeSessionToken(SITE_PASSWORD) : "";
-
 function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!SITE_PASSWORD) return next(); // No password = open (local dev)
 
-  // Check cookie
+  // Check cookie — HMAC-verified session token
   const cookies = req.headers.cookie || "";
   const tokenMatch = cookies.match(/council_session=([^;]+)/);
-  if (tokenMatch && tokenMatch[1] === validSessionToken) return next();
+  if (tokenMatch && verifySessionToken(tokenMatch[1])) return next();
 
-  // Check API key header (for programmatic access)
+  // Check API key header (for programmatic access) — HMAC constant-time comparison
   if (API_KEY) {
-    const provided = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
-    if (provided === API_KEY) return next();
+    const authHeader = req.headers["authorization"] || "";
+    const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+    const provided = (req.headers["x-api-key"] as string) || bearerMatch?.[1] || "";
+    if (provided) {
+      const providedHash = crypto.createHmac("sha256", SESSION_SECRET).update(provided).digest();
+      const expectedHash = crypto.createHmac("sha256", SESSION_SECRET).update(API_KEY).digest();
+      if (crypto.timingSafeEqual(providedHash, expectedHash)) {
+        return next();
+      }
+    }
   }
-
-  // Check query param token (for SSE connections)
-  if (req.query.token === validSessionToken) return next();
 
   // Not authenticated — if requesting HTML, serve login page; otherwise 401
   if (req.headers.accept?.includes("text/html") || req.path === "/") {
@@ -128,8 +149,16 @@ const LOGIN_PAGE = `<!DOCTYPE html>
 
 function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
   if (!API_KEY) return next();
-  const provided = req.headers["x-api-key"] || req.headers["authorization"]?.replace("Bearer ", "");
-  if (provided === API_KEY) return next();
+  const authHeader = req.headers["authorization"] || "";
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+  const provided = (req.headers["x-api-key"] as string) || bearerMatch?.[1] || "";
+  if (provided) {
+    const providedHash = crypto.createHmac("sha256", SESSION_SECRET).update(provided).digest();
+    const expectedHash = crypto.createHmac("sha256", SESSION_SECRET).update(API_KEY).digest();
+    if (crypto.timingSafeEqual(providedHash, expectedHash)) {
+      return next();
+    }
+  }
   res.status(401).json({ error: "Invalid or missing API key" });
 }
 
@@ -282,10 +311,7 @@ interface ThreadData {
 const threads = new Map<string, ThreadData>();
 const clients = new Map<string, express.Response[]>();
 
-const generateId = () => {
-  const now = new Date();
-  return now.toISOString().replace(/[-:T]/g, "").slice(0, 14);
-};
+const generateId = () => crypto.randomUUID();
 
 // --- SSE helpers ---
 // Global SSE subscribers (for the /events endpoint the frontend uses — local dev only)
@@ -329,7 +355,7 @@ interface ModelResponse {
   usage: TokenUsage;
 }
 
-async function callOpenRouter(modelId: string, prompt: string, system: string, retries = 2): Promise<ModelResponse> {
+async function callOpenRouter(modelId: string, prompt: string, system: string, retries = 2, signal?: AbortSignal): Promise<ModelResponse> {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error("No OPENROUTER_API_KEY configured");
 
@@ -337,6 +363,7 @@ async function callOpenRouter(modelId: string, prompt: string, system: string, r
     try {
       const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
+        signal,
         headers: {
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json",
@@ -390,13 +417,14 @@ async function callOpenRouter(modelId: string, prompt: string, system: string, r
   throw new Error(`${modelId} failed after ${retries + 1} attempts`);
 }
 
-async function callGoogle(modelId: string, prompt: string, system: string): Promise<ModelResponse> {
+async function callGoogle(modelId: string, prompt: string, system: string, signal?: AbortSignal): Promise<ModelResponse> {
   const apiKey = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("No GOOGLE_API_KEY or GEMINI_API_KEY configured");
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
   const resp = await fetch(`${url}?key=${apiKey}`, {
     method: "POST",
+    signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: system }] },
@@ -425,16 +453,23 @@ async function callModel(key: string, prompt: string, systemOverride?: string, t
   if (!cfg) throw new Error(`Unknown model: ${key}`);
   const system = systemOverride || BASE_SYSTEM_PROMPT;
 
-  // Race against a timeout so one slow model can't kill the whole session
-  const result = await Promise.race([
-    cfg.provider === "google"
-      ? callGoogle(cfg.modelId, prompt, system)
-      : callOpenRouter(cfg.modelId, prompt, system),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`${cfg.name} timed out after ${timeoutMs / 1000}s`)), timeoutMs)
-    ),
-  ]);
-  return result;
+  // AbortController cancels the actual fetch on timeout (not just racing)
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const result = cfg.provider === "google"
+      ? await callGoogle(cfg.modelId, prompt, system, controller.signal)
+      : await callOpenRouter(cfg.modelId, prompt, system, 2, controller.signal);
+    return result;
+  } catch (err: any) {
+    if (err.name === "AbortError") {
+      throw new Error(`${cfg.name} timed out after ${timeoutMs / 1000}s`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // --- Structured Recommendation Engine ---
@@ -714,19 +749,22 @@ say so and explain why their counterarguments don't hold up.`;
     addMessage(threadId, { type: "message", role: "model", name: "bs-detector", text: "Checking...", done: false });
 
     // Feed anonymized versions to BS detector — prevents model authority bias
+    // NOTE: BULLSHIT_DETECTOR_PROMPT is passed as system prompt via callModel, not duplicated here
     const bsPrompt = `The user asked: ${topic}
 
 Round 1 (independent analyses — model identities anonymized):
 ${anonymizedR1}
 
 Round 2 (after cross-examination — model identities anonymized):
-${anonymizedR2}
-
-${BULLSHIT_DETECTOR_PROMPT}`;
+${anonymizedR2}`;
 
     try {
-      // Use remaining time minus a small buffer for synthesis
-      const bsTimeoutMs = Math.max(30_000, (290 - elapsedSoFar) * 1000);
+      // Use remaining time minus buffer for synthesis — skip if we'd exceed Vercel limit
+      const remainingForBs = (260 - elapsedSoFar) * 1000;
+      if (remainingForBs <= 10_000) {
+        throw new Error("Not enough time remaining — skipping to synthesis");
+      }
+      const bsTimeoutMs = Math.max(30_000, remainingForBs);
       const bsResponse = await callModel(bsDetectorKey, bsPrompt, BULLSHIT_DETECTOR_PROMPT, bsTimeoutMs);
       bsDetectorText = bsResponse.text;
       trackCost(bsResponse.usage);
@@ -757,6 +795,7 @@ ${BULLSHIT_DETECTOR_PROMPT}`;
     text: `Synthesis — ${MODELS[synthModelKey]?.name || synthModelKey} extracting the recommendation.`,
   });
 
+  // NOTE: SYNTHESIS_PROMPT_TEMPLATE is passed as system prompt via callModel, not duplicated here
   const synthPrompt = `The user asked: ${topic}
 
 Round 1 (independent analyses):
@@ -765,15 +804,14 @@ ${allPositions}
 Round 2 (cross-examination):
 ${allR2}
 
-${bsDetectorText ? `Quality Check (bullshit detector):\n${bsDetectorText}\n` : ""}
+${bsDetectorText ? `Quality Check (bullshit detector):\n${bsDetectorText}\n` : ""}`;
 
-${SYNTHESIS_PROMPT_TEMPLATE}`;
-
-  // Validate synthesis prompt isn't too huge
+  // Validate and truncate synthesis prompt if over budget
   const synthTokenEst = estimateTokens(synthPrompt);
-  if (synthTokenEst > MAX_ROUND_INPUT_TOKENS) {
-    console.log(`  ⚠️ Synthesis prompt ${synthTokenEst} tokens — over budget, truncating...`);
-  }
+  const finalSynthPrompt = synthTokenEst > MAX_ROUND_INPUT_TOKENS
+    ? (console.log(`  ⚠️ Synthesis prompt ${synthTokenEst} tokens — over budget, truncating...`),
+       truncateToTokenBudget(synthPrompt, MAX_ROUND_INPUT_TOKENS))
+    : synthPrompt;
 
   let synthesisText = "";
   let confidence = 75;
@@ -784,7 +822,7 @@ ${SYNTHESIS_PROMPT_TEMPLATE}`;
     const synthElapsed = (Date.now() - startTime) / 1000;
     const synthTimeoutMs = Math.max(60_000, (295 - synthElapsed) * 1000);
     console.log(`  ⏱️ Synthesis timeout: ${(synthTimeoutMs / 1000).toFixed(0)}s (${synthElapsed.toFixed(0)}s elapsed)`);
-    const response = await callModel(synthModelKey, synthPrompt, SYNTHESIS_PROMPT_TEMPLATE, synthTimeoutMs);
+    const response = await callModel(synthModelKey, finalSynthPrompt, SYNTHESIS_PROMPT_TEMPLATE, synthTimeoutMs);
     synthesisText = response.text;
     trackCost(response.usage);
 
@@ -795,14 +833,18 @@ ${SYNTHESIS_PROMPT_TEMPLATE}`;
     } else if (synthesisText.toLowerCase().includes("gridlock") || synthesisText.toLowerCase().includes("could not resolve")) {
       confidence = 35;
       consensusType = "divergent";
-    } else if (synthesisText.includes("VERY HIGH") || /\b9[0-9]\b/.test(synthesisText)) {
-      confidence = 92;
-    } else if (synthesisText.includes("HIGH") || /\b8[0-9]\b/.test(synthesisText)) {
-      confidence = 82;
-    } else if (synthesisText.includes("MEDIUM") || /\b[56][0-9]\b/.test(synthesisText)) {
-      confidence = 62;
-    } else if (synthesisText.includes("LOW") || /\b[34][0-9]\b/.test(synthesisText)) {
-      confidence = 40;
+    } else {
+      // Fallback: look for confidence-anchored patterns (avoid matching random numbers)
+      const confContext = synthesisText.toLowerCase();
+      if (confContext.includes("very high confidence") || confContext.includes("confidence: very high")) {
+        confidence = 92;
+      } else if (confContext.includes("high confidence") || confContext.includes("confidence: high")) {
+        confidence = 82;
+      } else if (confContext.includes("medium confidence") || confContext.includes("moderate confidence") || confContext.includes("confidence: medium")) {
+        confidence = 62;
+      } else if (confContext.includes("low confidence") || confContext.includes("confidence: low")) {
+        confidence = 40;
+      }
     }
 
     if (synthesisText.toLowerCase().includes("unanimous") || synthesisText.toLowerCase().includes("all models agree")) consensusType = "unanimous";
@@ -862,6 +904,7 @@ async function runSynthesisOnly(threadId: string, topic: string, modelKeys: stri
     text: `Synthesis — ${MODELS[synthModelKey]?.name || synthModelKey} extracting the recommendation.`,
   });
 
+  // NOTE: SYNTHESIS_PROMPT_TEMPLATE is passed as system prompt via callModel, not duplicated here
   const synthPrompt = `The user asked: ${topic}
 
 Round 1 (independent analyses):
@@ -870,9 +913,7 @@ ${roundData.round1}
 Round 2 (cross-examination):
 ${roundData.round2}
 
-${roundData.bsDetector ? `Quality Check (bullshit detector):\n${roundData.bsDetector}\n` : ""}
-
-${SYNTHESIS_PROMPT_TEMPLATE}`;
+${roundData.bsDetector ? `Quality Check (bullshit detector):\n${roundData.bsDetector}\n` : ""}`;
 
   let synthesisText = "";
   let confidence = 75;
@@ -889,14 +930,17 @@ ${SYNTHESIS_PROMPT_TEMPLATE}`;
     } else if (synthesisText.toLowerCase().includes("gridlock") || synthesisText.toLowerCase().includes("could not resolve")) {
       confidence = 35;
       consensusType = "divergent";
-    } else if (synthesisText.includes("VERY HIGH") || /\b9[0-9]\b/.test(synthesisText)) {
-      confidence = 92;
-    } else if (synthesisText.includes("HIGH") || /\b8[0-9]\b/.test(synthesisText)) {
-      confidence = 82;
-    } else if (synthesisText.includes("MEDIUM") || /\b[56][0-9]\b/.test(synthesisText)) {
-      confidence = 62;
-    } else if (synthesisText.includes("LOW") || /\b[34][0-9]\b/.test(synthesisText)) {
-      confidence = 40;
+    } else {
+      const confContext = synthesisText.toLowerCase();
+      if (confContext.includes("very high confidence") || confContext.includes("confidence: very high")) {
+        confidence = 92;
+      } else if (confContext.includes("high confidence") || confContext.includes("confidence: high")) {
+        confidence = 82;
+      } else if (confContext.includes("medium confidence") || confContext.includes("moderate confidence") || confContext.includes("confidence: medium")) {
+        confidence = 62;
+      } else if (confContext.includes("low confidence") || confContext.includes("confidence: low")) {
+        confidence = 40;
+      }
     }
 
     if (synthesisText.toLowerCase().includes("unanimous") || synthesisText.toLowerCase().includes("all models agree")) consensusType = "unanimous";
@@ -988,11 +1032,13 @@ function detectAddressedModels(text: string, threadModels: string[]): string[] {
 // --- Routes ---
 
 app.post("/start", async (req, res) => {
-  const topic = req.body.topic?.trim();
-  const models = req.body.models || ["claude", "gemini", "gpt5", "deepseek"];
-  const systemContext = req.body.systemContext?.trim();
+  const topic = req.body.topic?.trim()?.slice(0, 10_000); // Max 10K chars
+  const modelInput = Array.isArray(req.body.models) ? req.body.models : ["claude", "gemini", "gpt5", "deepseek"];
+  const models = modelInput.filter((m: string) => typeof m === "string" && MODELS[m]).slice(0, 9); // Max 9 models, only valid ones
+  const systemContext = req.body.systemContext?.trim()?.slice(0, 20_000); // Max 20K chars context
   const skipClarification = req.body.skipClarification === true;
   if (!topic) return res.status(400).json({ error: "No topic" });
+  if (models.length === 0) return res.status(400).json({ error: "No valid models" });
 
   const tid = generateId();
   threads.set(tid, {
@@ -1031,11 +1077,12 @@ app.post("/start", async (req, res) => {
 // ── Standalone synthesis endpoint — gets its own fresh 300s Vercel budget ──
 app.post("/synthesize", async (req, res) => {
   const tid = req.body.thread_id;
-  const topic = req.body.topic?.trim();
-  const models = req.body.models || ["claude"];
-  const round1 = req.body.round1 || "";
-  const round2 = req.body.round2 || "";
-  const bsDetector = req.body.bsDetector || "";
+  const topic = req.body.topic?.trim()?.slice(0, 10_000);
+  const modelInput = Array.isArray(req.body.models) ? req.body.models : ["claude"];
+  const models = modelInput.filter((m: string) => typeof m === "string" && MODELS[m]).slice(0, 9);
+  const round1 = (req.body.round1 || "").slice(0, 100_000); // Cap round data
+  const round2 = (req.body.round2 || "").slice(0, 100_000);
+  const bsDetector = (req.body.bsDetector || "").slice(0, 50_000);
 
   if (!tid || !topic) return res.status(400).json({ error: "Missing thread_id or topic" });
 
@@ -1070,10 +1117,11 @@ app.post("/synthesize", async (req, res) => {
 // Serverless-safe: frontend sends full context since threads don't persist across invocations
 app.post("/clarify", async (req, res) => {
   const tid = req.body.thread_id;
-  const answers = req.body.answers?.trim(); // Optional — empty = skip
-  const topic = req.body.topic?.trim();
-  const models = req.body.models || ["claude", "gemini", "gpt5", "deepseek"];
-  const systemContext = req.body.systemContext?.trim();
+  const answers = req.body.answers?.trim()?.slice(0, 20_000); // Max 20K chars
+  const topic = req.body.topic?.trim()?.slice(0, 10_000);
+  const modelInput = Array.isArray(req.body.models) ? req.body.models : ["claude", "gemini", "gpt5", "deepseek"];
+  const models = modelInput.filter((m: string) => typeof m === "string" && MODELS[m]).slice(0, 9);
+  const systemContext = req.body.systemContext?.trim()?.slice(0, 20_000);
 
   if (!tid || !topic) return res.status(400).json({ error: "Missing thread_id or topic" });
 
@@ -1115,9 +1163,10 @@ app.post("/clarify", async (req, res) => {
 // sync=true (default for API callers): waits for full discussion, returns recap
 // sync=false (default for UI): returns immediately, streams via SSE
 app.post("/api/ask", requireApiKey, async (req, res) => {
-  const question = req.body.question?.trim();
-  const models = req.body.models || ["claude", "gemini", "gpt5", "deepseek"];
-  const systemContext = req.body.systemContext?.trim();
+  const question = req.body.question?.trim()?.slice(0, 10_000);
+  const modelInput = Array.isArray(req.body.models) ? req.body.models : ["claude", "gemini", "gpt5", "deepseek"];
+  const models = modelInput.filter((m: string) => typeof m === "string" && MODELS[m]).slice(0, 9);
+  const systemContext = req.body.systemContext?.trim()?.slice(0, 20_000);
   const sync = req.body.sync === true;
 
   if (!question) return res.status(400).json({ error: "No question" });
@@ -1129,34 +1178,105 @@ app.post("/api/ask", requireApiKey, async (req, res) => {
   });
 
   if (sync) {
-    // Programmatic API: run full discussion (no pause for clarification)
-    await runClarificationRound(tid, question, models);
-    const thread = threads.get(tid);
-    if (thread) thread.status = "active"; // Override awaiting state
-    await runAnalysisRounds(tid, question, models);
-    const threadFinal = threads.get(tid);
-    res.json({
-      thread_id: tid, status: "complete",
-      recap: threadFinal?.recap || "No recap generated.",
-      messages: threadFinal?.messages?.filter((m: any) => m.done && m.text && !m.typing) || [],
-    });
+    // Programmatic API: skip clarification, run analysis directly
+    try {
+      await runAnalysisRounds(tid, question, models);
+      const threadFinal = threads.get(tid);
+      res.json({
+        thread_id: tid, status: "complete",
+        recap: threadFinal?.recap || "No recap generated.",
+        messages: threadFinal?.messages?.filter((m: any) => m.done && m.text && !m.typing) || [],
+      });
+    } catch (err: any) {
+      console.error("Sync API error:", err);
+      res.status(500).json({ error: `Analysis failed: ${err.message}` });
+    }
   } else {
-    // Stream SSE inline — also run full for API callers (no UI pause)
+    // Stream SSE inline — skip clarification for API callers
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.write(`data: ${JSON.stringify({ type: "thread_created", thread_id: tid })}\n\n`);
     threadStreamTargets.set(tid, res);
     try {
-      await runClarificationRound(tid, question, models);
-      const thread = threads.get(tid);
-      if (thread) thread.status = "active";
       await runAnalysisRounds(tid, question, models);
     } finally {
       threadStreamTargets.delete(tid);
       res.end();
     }
   }
+});
+
+// ─── META-QA: Multi-model quality check on Council outputs ───
+// After a deliberation completes, hit /api/qa to get a parallel quality review
+// from 3 frontier models. Same pattern as the AWS QA pipeline.
+app.post("/api/qa", requireApiKey, async (req, res) => {
+  const threadId = req.body.thread_id;
+  const content = req.body.content?.trim()?.slice(0, 20_000);
+
+  if (!content && !threadId) {
+    return res.status(400).json({ error: "Provide 'content' or 'thread_id'" });
+  }
+
+  // If thread_id provided, use the recap as content
+  let textToReview = content || "";
+  if (threadId && !textToReview) {
+    const thread = threads.get(threadId);
+    if (thread?.recap) {
+      textToReview = thread.recap;
+    } else {
+      return res.status(404).json({ error: "Thread not found or no recap available" });
+    }
+  }
+
+  const qaModels = ["claude", "gpt5", "gemini"].filter(m => MODELS[m]);
+  if (qaModels.length === 0) {
+    return res.status(500).json({ error: "No QA models available" });
+  }
+
+  const qaSystemPrompt = `You are a quality reviewer. Analyze this Council deliberation output for:
+1. Factual accuracy — any claims that seem wrong or unsupported?
+2. Logical consistency — do the conclusions follow from the arguments?
+3. Completeness — are important perspectives missing?
+4. Actionability — can the reader actually use this advice?
+
+Rate each dimension 1-5 and give an overall verdict:
+VERDICT: PASS (4+ on all) | NEEDS_IMPROVEMENT (any 2-3) | FAIL (any 1)
+
+Be concise. Focus on real issues, not nitpicks.`;
+
+  const qaPrompt = `Review this Council deliberation output:\n\n${textToReview}`;
+
+  // Fan out to QA models in parallel
+  const qaResults = await Promise.all(
+    qaModels.map(async (modelKey) => {
+      const cfg = MODELS[modelKey];
+      try {
+        const result = await callOpenRouter(cfg.modelId, qaPrompt, qaSystemPrompt, 1);
+        return { model: modelKey, name: cfg.name, content: result, error: null };
+      } catch (err: any) {
+        return { model: modelKey, name: cfg.name, content: null, error: err.message };
+      }
+    })
+  );
+
+  // Count verdicts
+  let passes = 0;
+  let fails = 0;
+  for (const r of qaResults) {
+    if (r.content?.includes("VERDICT: PASS")) passes++;
+    if (r.content?.includes("VERDICT: FAIL")) fails++;
+  }
+
+  const consensus = fails > 0 ? "FAIL" : passes === qaResults.length ? "PASS" : "NEEDS_REVIEW";
+
+  res.json({
+    consensus,
+    passes,
+    fails,
+    total: qaResults.length,
+    reviews: qaResults,
+  });
 });
 
 app.get("/threads", (req, res) => {
@@ -1168,18 +1288,28 @@ app.get("/threads", (req, res) => {
 
 app.post("/human", async (req, res) => {
   const tid = req.body.thread_id;
-  const text = req.body.text?.trim();
-  const topic = req.body.topic?.trim(); // Frontend sends topic for serverless reconstruction
+  const text = req.body.text?.trim()?.slice(0, 10_000);
+  const topic = req.body.topic?.trim()?.slice(0, 10_000);
   if (!text) return res.status(400).json({ error: "Empty" });
+  if (!tid || typeof tid !== "string") return res.status(400).json({ error: "Missing thread_id" });
 
   // Reconstruct thread if needed (serverless: different invocation)
   let thread = threads.get(tid);
   if (!thread && topic) {
+    const modelInput = Array.isArray(req.body.models) ? req.body.models : ["claude", "gemini", "gpt5", "deepseek"];
+    // Validate and cap previousMessages to prevent memory abuse
+    const prevMessages = Array.isArray(req.body.previousMessages)
+      ? req.body.previousMessages.slice(-30).map((m: any) => ({
+          type: m.type, role: m.role, name: m.name,
+          text: typeof m.text === "string" ? m.text.slice(0, 10_000) : "",
+          done: m.done,
+        }))
+      : [];
     thread = {
       id: tid, topic, status: "complete", created: new Date().toISOString(),
-      models: req.body.models || ["claude", "gemini", "gpt5", "deepseek"],
-      messages: req.body.previousMessages || [],
-      systemContext: req.body.systemContext,
+      models: modelInput.filter((m: string) => MODELS[m]).slice(0, 9),
+      messages: prevMessages,
+      systemContext: req.body.systemContext?.trim()?.slice(0, 20_000),
       totalCost: 0,
     };
     threads.set(tid, thread);
@@ -1209,25 +1339,56 @@ app.post("/human", async (req, res) => {
 app.post("/save/:threadId", async (req, res) => {
   const tid = req.params.threadId;
 
+  // Validate thread ID format (must be UUID to prevent path traversal)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tid)) {
+    return res.status(400).json({ error: "Invalid thread ID format" });
+  }
+
   // Accept thread data from the frontend (since serverless may not have it in memory)
   const threadData = req.body.thread || threads.get(tid);
-  const messages = req.body.messages || threadData?.messages || [];
-  const recap = req.body.recap || threadData?.recap || "";
+  const rawMessages = req.body.messages || threadData?.messages || [];
+  const recap = typeof req.body.recap === "string" ? req.body.recap.slice(0, 50_000) : (threadData?.recap || "");
 
   if (!threadData && !req.body.thread) {
     return res.status(404).json({ error: "Thread not found and no data provided" });
   }
 
+  // Sanitize messages — only persist expected fields, cap counts and sizes
+  const messages = Array.isArray(rawMessages)
+    ? rawMessages.slice(0, 200).map((m: any) => ({
+        type: m.type, role: m.role, name: typeof m.name === "string" ? m.name.slice(0, 50) : undefined,
+        text: typeof m.text === "string" ? m.text.slice(0, 30_000) : "",
+        done: !!m.done, phase: m.phase, synthesis: m.synthesis,
+        timestamp: m.timestamp,
+      }))
+    : [];
+
+  // Sanitize thread data — only persist expected fields
+  const safeThread = {
+    id: tid,
+    topic: typeof threadData?.topic === "string" ? threadData.topic.slice(0, 10_000) : "",
+    status: "saved",
+    created: threadData?.created || new Date().toISOString(),
+    models: Array.isArray(threadData?.models) ? threadData.models.filter((m: string) => typeof m === "string").slice(0, 9) : [],
+    totalCost: typeof threadData?.totalCost === "number" ? threadData.totalCost : 0,
+  };
+
   try {
+    // Check if this thread already exists — only allow saving once (no overwrites)
+    const { blobs: existing } = await list({ prefix: `council/threads/${tid}.json` });
+    if (existing.some(b => b.pathname === `council/threads/${tid}.json`)) {
+      return res.status(409).json({ error: "Thread already saved — overwrites not allowed" });
+    }
+
     const payload = {
-      thread: threadData,
+      thread: safeThread,
       messages,
       recap,
       savedAt: new Date().toISOString(),
     };
 
     const blob = await put(`council/threads/${tid}.json`, JSON.stringify(payload), {
-      access: "public",
+      access: "private",
       contentType: "application/json",
       addRandomSuffix: false,
     });
@@ -1247,12 +1408,23 @@ app.post("/save/:threadId", async (req, res) => {
 // ── Load thread from Vercel Blob ──
 app.get("/load/:threadId", async (req, res) => {
   const tid = req.params.threadId;
+
+  // Validate thread ID format (must be UUID)
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tid)) {
+    return res.status(400).json({ error: "Invalid thread ID format" });
+  }
+
   try {
     const { blobs } = await list({ prefix: `council/threads/${tid}.json` });
-    if (!blobs.length) {
+    const exactBlob = blobs.find(b => b.pathname === `council/threads/${tid}.json`);
+    if (!exactBlob) {
       return res.status(404).json({ error: "Thread not found in cloud storage" });
     }
-    const response = await fetch(blobs[0].url);
+    // Use downloadUrl for private blobs
+    const response = await fetch(exactBlob.downloadUrl);
+    if (!response.ok) {
+      return res.status(502).json({ error: `Failed to fetch from blob storage: ${response.status}` });
+    }
     const data = await response.json();
     res.json(data);
   } catch (err: any) {
