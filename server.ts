@@ -302,6 +302,18 @@ interface ThreadData {
   stakes?: string;
   reversible?: boolean;
   recap?: string;
+  summary?: {
+    finalConfidence?: number | null;
+    isConsensus?: "unanimous" | "additive" | "divergent" | null;
+    recommendation?: string | null;
+    keyCaveat?: string | null;
+    nextStep?: string | null;
+    elapsedTime?: string | null;
+    estimatedCost?: string | null;
+    liveCost?: number;
+    liveElapsed?: number;
+    agentPayload?: any;
+  };
   systemContext?: string; // Human-injected system prompt / context
   clarificationAnswers?: string; // User's answers to Round 0 questions
   totalCost: number;  // Running cost in USD
@@ -312,6 +324,21 @@ const threads = new Map<string, ThreadData>();
 const clients = new Map<string, express.Response[]>();
 
 const generateId = () => crypto.randomUUID();
+
+async function loadSavedThreadPayload(tid: string) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return null;
+
+  const { blobs } = await list({ prefix: `council/threads/${tid}.json` });
+  const exactBlob = blobs.find(b => b.pathname === `council/threads/${tid}.json`);
+  if (!exactBlob) return null;
+
+  const response = await fetch(exactBlob.downloadUrl);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch from blob storage: ${response.status}`);
+  }
+
+  return response.json();
+}
 
 // --- SSE helpers ---
 // Global SSE subscribers (for the /events endpoint the frontend uses — local dev only)
@@ -873,6 +900,17 @@ ${bsDetectorText ? `Quality Check (bullshit detector):\n${bsDetectorText}\n` : "
   if (thread) {
     thread.status = "complete";
     thread.recap = synthesisText;
+    thread.summary = {
+      finalConfidence: confidence > 1 ? confidence / 100 : confidence,
+      isConsensus: consensusType,
+      recommendation: "See synthesis above.",
+      keyCaveat: "Review confidence assessment.",
+      nextStep: "Follow the Next Actions in the synthesis.",
+      elapsedTime: `${elapsed}s`,
+      estimatedCost: `$${thread.totalCost.toFixed(3)}`,
+      liveCost: thread.totalCost,
+      liveElapsed: Number(elapsed),
+    };
   }
 
   addMessage(threadId, { type: "status", phase: "complete", text: "Analysis complete. Type to ask follow-ups.", done: true });
@@ -969,6 +1007,17 @@ ${roundData.bsDetector ? `Quality Check (bullshit detector):\n${roundData.bsDete
   if (thread) {
     thread.status = "complete";
     thread.recap = synthesisText;
+    thread.summary = {
+      finalConfidence: confidence > 1 ? confidence / 100 : confidence,
+      isConsensus: consensusType,
+      recommendation: "See synthesis above.",
+      keyCaveat: "Review confidence assessment.",
+      nextStep: "Follow the Next Actions in the synthesis.",
+      elapsedTime: `${elapsed}s`,
+      estimatedCost: `$${thread.totalCost.toFixed(3)}`,
+      liveCost: thread.totalCost,
+      liveElapsed: Number(elapsed),
+    };
   }
 
   addMessage(threadId, { type: "status", phase: "complete", text: "Analysis complete. Type to ask follow-ups.", done: true });
@@ -1348,6 +1397,20 @@ app.post("/save/:threadId", async (req, res) => {
   const threadData = req.body.thread || threads.get(tid);
   const rawMessages = req.body.messages || threadData?.messages || [];
   const recap = typeof req.body.recap === "string" ? req.body.recap.slice(0, 50_000) : (threadData?.recap || "");
+  const summary = req.body.summary && typeof req.body.summary === "object"
+    ? {
+        finalConfidence: typeof req.body.summary.finalConfidence === "number" ? req.body.summary.finalConfidence : null,
+        isConsensus: typeof req.body.summary.isConsensus === "string" ? req.body.summary.isConsensus : null,
+        recommendation: typeof req.body.summary.recommendation === "string" ? req.body.summary.recommendation.slice(0, 10_000) : null,
+        keyCaveat: typeof req.body.summary.keyCaveat === "string" ? req.body.summary.keyCaveat.slice(0, 10_000) : null,
+        nextStep: typeof req.body.summary.nextStep === "string" ? req.body.summary.nextStep.slice(0, 10_000) : null,
+        elapsedTime: typeof req.body.summary.elapsedTime === "string" ? req.body.summary.elapsedTime.slice(0, 100) : null,
+        estimatedCost: typeof req.body.summary.estimatedCost === "string" ? req.body.summary.estimatedCost.slice(0, 100) : null,
+        liveCost: typeof req.body.summary.liveCost === "number" ? req.body.summary.liveCost : undefined,
+        liveElapsed: typeof req.body.summary.liveElapsed === "number" ? req.body.summary.liveElapsed : undefined,
+        agentPayload: req.body.summary.agentPayload ?? null,
+      }
+    : (threadData?.summary || undefined);
 
   if (!threadData && !req.body.thread) {
     return res.status(404).json({ error: "Thread not found and no data provided" });
@@ -1371,6 +1434,8 @@ app.post("/save/:threadId", async (req, res) => {
     created: threadData?.created || new Date().toISOString(),
     models: Array.isArray(threadData?.models) ? threadData.models.filter((m: string) => typeof m === "string").slice(0, 9) : [],
     totalCost: typeof threadData?.totalCost === "number" ? threadData.totalCost : 0,
+    stakes: typeof threadData?.stakes === "string" ? threadData.stakes : undefined,
+    reversible: typeof threadData?.reversible === "boolean" ? threadData.reversible : undefined,
   };
 
   try {
@@ -1384,6 +1449,7 @@ app.post("/save/:threadId", async (req, res) => {
       thread: safeThread,
       messages,
       recap,
+      summary,
       savedAt: new Date().toISOString(),
     };
 
@@ -1415,17 +1481,10 @@ app.get("/load/:threadId", async (req, res) => {
   }
 
   try {
-    const { blobs } = await list({ prefix: `council/threads/${tid}.json` });
-    const exactBlob = blobs.find(b => b.pathname === `council/threads/${tid}.json`);
-    if (!exactBlob) {
+    const data = await loadSavedThreadPayload(tid);
+    if (!data) {
       return res.status(404).json({ error: "Thread not found in cloud storage" });
     }
-    // Use downloadUrl for private blobs
-    const response = await fetch(exactBlob.downloadUrl);
-    if (!response.ok) {
-      return res.status(502).json({ error: `Failed to fetch from blob storage: ${response.status}` });
-    }
-    const data = await response.json();
     res.json(data);
   } catch (err: any) {
     console.error(`[Blob] Load error for ${tid}:`, err);
@@ -1491,13 +1550,40 @@ app.get("/stream/:threadId", (req, res) => {
   });
 });
 
-app.get("/thread/:tid", (req, res) => {
-  const thread = threads.get(req.params.tid);
-  if (!thread) return res.status(404).json({ error: "Not found" });
-  res.json({
-    ...thread,
-    messages: thread.messages.filter((m: any) => !m.typing && !m.ping),
-  });
+app.get("/thread/:tid", async (req, res) => {
+  const tid = req.params.tid;
+  const thread = threads.get(tid);
+  if (thread) {
+    return res.json({
+      ...thread,
+      messages: thread.messages.filter((m: any) => !m.typing && !m.ping),
+    });
+  }
+
+  try {
+    const payload = await loadSavedThreadPayload(tid);
+    if (!payload?.thread) return res.status(404).json({ error: "Not found" });
+
+    const restoredThread: ThreadData = {
+      ...payload.thread,
+      status: payload.thread.status === "saved" ? "complete" : payload.thread.status,
+      messages: Array.isArray(payload.messages) ? payload.messages : [],
+      recap: typeof payload.recap === "string" ? payload.recap : undefined,
+      summary: payload.summary,
+      totalCost: typeof payload.thread.totalCost === "number" ? payload.thread.totalCost : 0,
+    };
+
+    threads.set(tid, restoredThread);
+
+    return res.json({
+      ...restoredThread,
+      source: "cloud",
+      messages: restoredThread.messages.filter((m: any) => !m.typing && !m.ping),
+    });
+  } catch (err: any) {
+    console.error(`[Thread] Restore error for ${tid}:`, err);
+    return res.status(500).json({ error: `Failed to restore: ${err.message}` });
+  }
 });
 
 // Polling endpoint — alternative to SSE for serverless environments

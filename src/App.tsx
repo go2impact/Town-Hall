@@ -90,6 +90,7 @@ export default function App() {
   const [isRagConnected, setIsRagConnected] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [showTemplateEditor, setShowTemplateEditor] = useState(false);
+  const [showAdvancedControls, setShowAdvancedControls] = useState(false);
 
   const TEMPLATES = [
     { id: 'general', name: 'General Decision', icon: <Brain className="w-4 h-4" /> },
@@ -118,6 +119,79 @@ export default function App() {
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const resetThreadView = () => {
+    setMessages([]);
+    setRecap(null);
+    recapReceivedRef.current = false;
+    setCurrentRound(null);
+    setPhase('idle');
+    setFinalConfidence(null);
+    setIsConsensus(null);
+    setRecommendation(null);
+    setKeyCaveat(null);
+    setNextStep(null);
+    setElapsedTime(null);
+    setEstimatedCost(null);
+    setLiveCost(0);
+    setLiveElapsed(0);
+    setAgentPayload(null);
+    setIsTranscriptExpanded(true);
+  };
+
+  const applyThreadSummary = (summary: any) => {
+    if (!summary || typeof summary !== 'object') return;
+    if (summary.finalConfidence !== undefined) setFinalConfidence(summary.finalConfidence);
+    if (summary.isConsensus !== undefined) setIsConsensus(summary.isConsensus);
+    if (summary.recommendation !== undefined) setRecommendation(summary.recommendation);
+    if (summary.keyCaveat !== undefined) setKeyCaveat(summary.keyCaveat);
+    if (summary.nextStep !== undefined) setNextStep(summary.nextStep);
+    if (summary.elapsedTime !== undefined) setElapsedTime(summary.elapsedTime);
+    if (summary.estimatedCost !== undefined) setEstimatedCost(summary.estimatedCost);
+    if (summary.liveCost !== undefined) setLiveCost(summary.liveCost);
+    if (summary.liveElapsed !== undefined) setLiveElapsed(summary.liveElapsed);
+    if (summary.agentPayload !== undefined) setAgentPayload(summary.agentPayload);
+  };
+
+  const hydrateThreadFromLocal = (tid: string) => {
+    let restored = false;
+
+    const savedMsgs = localStorage.getItem(`council_msgs_${tid}`);
+    if (savedMsgs) {
+      try {
+        setMessages(JSON.parse(savedMsgs));
+        restored = true;
+      } catch {}
+    }
+
+    const savedRecap = localStorage.getItem(`council_recap_${tid}`);
+    if (savedRecap) {
+      setRecap(savedRecap);
+      setIsTranscriptExpanded(false);
+      restored = true;
+    }
+
+    const savedSummary = localStorage.getItem(`council_summary_${tid}`);
+    if (savedSummary) {
+      try {
+        applyThreadSummary(JSON.parse(savedSummary));
+        restored = true;
+      } catch {}
+    }
+
+    const savedPhase = localStorage.getItem(`council_phase_${tid}`);
+    if (savedPhase === 'awaiting_clarification') {
+      setPhase('awaiting_clarification');
+      setIsLoading(false);
+      setIsTyping(false);
+      restored = true;
+    } else if (savedPhase && savedPhase !== 'idle') {
+      setPhase('idle');
+      restored = true;
+    }
+
+    return restored;
   };
 
   useEffect(() => {
@@ -156,6 +230,49 @@ export default function App() {
     }
   }, [messages, recap, activeThreadId]);
 
+  useEffect(() => {
+    if (!activeThreadId) return;
+
+    const hasSummary =
+      finalConfidence !== null ||
+      isConsensus !== null ||
+      !!recommendation ||
+      !!keyCaveat ||
+      !!nextStep ||
+      !!elapsedTime ||
+      !!estimatedCost ||
+      liveCost > 0 ||
+      liveElapsed > 0 ||
+      !!agentPayload;
+
+    if (!hasSummary) return;
+
+    localStorage.setItem(`council_summary_${activeThreadId}`, JSON.stringify({
+      finalConfidence,
+      isConsensus,
+      recommendation,
+      keyCaveat,
+      nextStep,
+      elapsedTime,
+      estimatedCost,
+      liveCost,
+      liveElapsed,
+      agentPayload,
+    }));
+  }, [
+    activeThreadId,
+    finalConfidence,
+    isConsensus,
+    recommendation,
+    keyCaveat,
+    nextStep,
+    elapsedTime,
+    estimatedCost,
+    liveCost,
+    liveElapsed,
+    agentPayload,
+  ]);
+
   // Persist phase per thread so clarification survives refresh/tab sleep
   useEffect(() => {
     if (activeThreadId && phase !== 'idle') {
@@ -166,26 +283,7 @@ export default function App() {
   // Load messages from localStorage when switching threads
   useEffect(() => {
     if (activeThreadId) {
-      const savedMsgs = localStorage.getItem(`council_msgs_${activeThreadId}`);
-      if (savedMsgs) {
-        try {
-          const parsed = JSON.parse(savedMsgs);
-          if (parsed.length > 0 && messages.length === 0) setMessages(parsed);
-        } catch {}
-      }
-      const savedRecap = localStorage.getItem(`council_recap_${activeThreadId}`);
-      if (savedRecap && !recap) setRecap(savedRecap);
-
-      // Restore phase — critical for surviving refresh while awaiting clarification
-      const savedPhase = localStorage.getItem(`council_phase_${activeThreadId}`);
-      if (savedPhase === 'awaiting_clarification') {
-        setPhase('awaiting_clarification');
-        setIsLoading(false);
-        setIsTyping(false);
-      } else if (savedPhase && savedPhase !== 'idle') {
-        // Thread was mid-stream when page died — show as complete (can still follow up)
-        setPhase('idle');
-      }
+      hydrateThreadFromLocal(activeThreadId);
     }
   }, [activeThreadId]);
 
@@ -194,27 +292,58 @@ export default function App() {
     try {
       const res = await fetch('/threads');
       const data = await res.json();
-      if (data.length > 0) setThreads(data);
+      if (data.length > 0) {
+        setThreads(prev => {
+          const merged = new Map(prev.map(thread => [thread.id, thread]));
+          for (const thread of data) {
+            merged.set(thread.id, { ...merged.get(thread.id), ...thread, source: 'live' });
+          }
+          return Array.from(merged.values()).sort((a, b) => +new Date(b.created) - +new Date(a.created));
+        });
+      }
     } catch {}
   };
 
   const fetchThreadDetail = async (tid: string) => {
     setIsLoading(true);
+    resetThreadView();
+    setActiveThreadId(tid);
+    const restoredFromLocal = hydrateThreadFromLocal(tid);
+
     try {
       const res = await fetch(`/thread/${tid}`);
+      if (!res.ok) {
+        if (!restoredFromLocal) {
+          throw new Error(`Thread lookup failed: ${res.status}`);
+        }
+        return;
+      }
+
       const data = await res.json();
+
       if (data.source === 'file') {
         setRecap(data.content);
         setMessages([]);
         setIsTranscriptExpanded(false);
+        return;
+      }
+
+      if (data.summary) applyThreadSummary(data.summary);
+
+      if (data.messages) setMessages(data.messages);
+      if (data.recap) {
+        setRecap(data.recap);
+        setIsTranscriptExpanded(false);
       } else {
-        setMessages(data.messages || []);
         setRecap(null);
         setIsTranscriptExpanded(true);
       }
-      setActiveThreadId(tid);
     } catch (err) {
       console.error('Failed to fetch thread detail', err);
+      if (!restoredFromLocal) {
+        setActiveThreadId(null);
+        resetThreadView();
+      }
     } finally {
       setIsLoading(false);
     }
@@ -235,6 +364,18 @@ export default function App() {
           thread: thread || { id: threadId, status: 'complete' },
           messages: currentMessages,
           recap: savedRecap || '',
+          summary: {
+            finalConfidence,
+            isConsensus,
+            recommendation,
+            keyCaveat,
+            nextStep,
+            elapsedTime,
+            estimatedCost,
+            liveCost,
+            liveElapsed,
+            agentPayload,
+          },
         }),
       });
       const result = await res.json();
@@ -796,7 +937,7 @@ export default function App() {
         <div className="p-4 border-b border-[#262626] flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold text-lg tracking-tight">
             <Terminal className="w-5 h-5 text-blue-500" />
-            COWORK COUNCIL
+            TOWN HALL
           </div>
           <button 
             onClick={() => {
@@ -1141,61 +1282,72 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="space-y-6">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
-                    <Cpu className="w-4 h-4" />
-                    Orchestration Policy
-                    <Tip text="Controls how models debate and reach consensus. Higher confidence threshold = stricter agreement required." />
-                  </h3>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-bold">Synthesis Strategy <Tip text="How models reach a final answer. 'Debate until agree' runs the most thorough analysis." /></label>
+              <div className="space-y-4">
+                <button
+                  onClick={() => setShowAdvancedControls(prev => !prev)}
+                  className="w-full flex items-center justify-between p-4 rounded-2xl border border-white/10 bg-white/[0.02] hover:bg-white/[0.04] transition-colors text-left"
+                >
+                  <div className="space-y-1">
+                    <div className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
+                      <Cpu className="w-4 h-4" />
+                      Advanced Controls
                     </div>
-                    <div className="space-y-2">
-                      {(['majority', 'weighted_consensus', 'debate_to_consensus'] as const).map(strategy => (
-                        <button
-                          key={strategy}
-                          onClick={() => setSynthesisStrategy(strategy as any)}
-                          className={cn(
-                            "w-full text-left px-4 py-3 rounded-xl text-sm transition-all border",
-                            synthesisStrategy === strategy
-                              ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
-                              : "bg-white/5 border-transparent text-white/60 hover:bg-white/10 hover:text-white"
-                          )}
-                        >
-                          {strategy === 'majority' && "Find the most common agreement"}
-                          {strategy === 'weighted_consensus' && "Weighted Consensus (Quality over Confidence)"}
-                          {strategy === 'debate_to_consensus' && "Debate until they all agree"}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
-                    <div className="flex items-center justify-between">
-                      <label className="text-sm font-bold">Escalation Confidence Threshold <Tip text="If the AI's confidence in its answer is below this %, it flags the decision for your review." /></label>
-                      <span className="text-sm font-mono text-blue-400">{confidenceThreshold}%</span>
-                    </div>
-                    <p className="text-xs text-white/40 leading-relaxed">
-                      If the synthesized decision confidence falls below this threshold, the policy engine will automatically escalate for human review or trigger a secondary debate round.
+                    <p className="text-sm text-white/55">
+                      Draft orchestration knobs for internal tuning. Safe to ignore for normal Town Hall use.
                     </p>
-                    <input
-                      type="range"
-                      min="50"
-                      max="99"
-                      value={confidenceThreshold}
-                      onChange={(e) => setConfidenceThreshold(parseInt(e.target.value))}
-                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                    />
-                    <div className="flex justify-between text-[10px] font-mono text-white/30">
-                      <span>50% (Lenient)</span>
-                      <span>99% (Strict)</span>
+                  </div>
+                  <ChevronRight className={cn("w-5 h-5 text-white/40 transition-transform", showAdvancedControls && "rotate-90")} />
+                </button>
+
+                {showAdvancedControls && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-bold">Synthesis Strategy <Tip text="How models reach a final answer. 'Debate until agree' runs the most thorough analysis." /></label>
+                      </div>
+                      <div className="space-y-2">
+                        {(['majority', 'weighted_consensus', 'debate_to_consensus'] as const).map(strategy => (
+                          <button
+                            key={strategy}
+                            onClick={() => setSynthesisStrategy(strategy as any)}
+                            className={cn(
+                              "w-full text-left px-4 py-3 rounded-xl text-sm transition-all border",
+                              synthesisStrategy === strategy
+                                ? "bg-blue-500/10 border-blue-500/30 text-blue-400"
+                                : "bg-white/5 border-transparent text-white/60 hover:bg-white/10 hover:text-white"
+                            )}
+                          >
+                            {strategy === 'majority' && "Find the most common agreement"}
+                            {strategy === 'weighted_consensus' && "Weighted Consensus (Quality over Confidence)"}
+                            {strategy === 'debate_to_consensus' && "Debate until they all agree"}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02]">
+                      <div className="flex items-center justify-between">
+                        <label className="text-sm font-bold">Escalation Confidence Threshold <Tip text="If the AI's confidence in its answer is below this %, it flags the decision for your review." /></label>
+                        <span className="text-sm font-mono text-blue-400">{confidenceThreshold}%</span>
+                      </div>
+                      <p className="text-xs text-white/40 leading-relaxed">
+                        This is still a draft operator control. It is not the main Town Hall experience.
+                      </p>
+                      <input
+                        type="range"
+                        min="50"
+                        max="99"
+                        value={confidenceThreshold}
+                        onChange={(e) => setConfidenceThreshold(parseInt(e.target.value))}
+                        className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                      <div className="flex justify-between text-[10px] font-mono text-white/30">
+                        <span>50% (Lenient)</span>
+                        <span>99% (Strict)</span>
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
               </div>
             </div>
           )}
