@@ -103,7 +103,7 @@ const LOGIN_PAGE = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cowork Council — Login</title>
+  <title>Town Hall — Login</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, -apple-system, sans-serif;
@@ -123,7 +123,7 @@ const LOGIN_PAGE = `<!DOCTYPE html>
 </head>
 <body>
   <div class="login-box">
-    <h1>Cowork Council</h1>
+    <h1>Town Hall</h1>
     <p>Enter the password to continue</p>
     <div class="error" id="err">Wrong password</div>
     <form id="f">
@@ -368,7 +368,7 @@ async function callOpenRouter(modelId: string, prompt: string, system: string, r
           "Authorization": `Bearer ${apiKey}`,
           "Content-Type": "application/json",
           "HTTP-Referer": process.env.APP_URL || "https://council.cowork.ai",
-          "X-Title": "Cowork Council",
+          "X-Title": "Town Hall",
         },
         body: JSON.stringify({
           model: modelId,
@@ -514,7 +514,7 @@ async function runClarificationRound(threadId: string, topic: string, modelKeys:
 
   const clarifyPrompt = `The founder is asking: ${topic}${contextPrefix}
 
-Before the council analyzes this, what 2-4 clarifying questions would help give a MUCH better answer?
+Before the Town Hall analyzes this, what 2-4 clarifying questions would help give a MUCH better answer?
 
 Think about:
 - What assumptions might be wrong?
@@ -1538,7 +1538,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🏛️  Cowork Council running on http://localhost:${PORT}`);
+    console.log(`🏛️  Town Hall running on http://localhost:${PORT}`);
     console.log(`   Models: ${Object.values(MODELS).map(m => m.name).join(", ")}`);
     console.log(`   OpenRouter: ${process.env.OPENROUTER_API_KEY ? "✅" : "❌"}`);
     console.log(`   Google AI: ${process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY ? "✅" : "❌"}`);

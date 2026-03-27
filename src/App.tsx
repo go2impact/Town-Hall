@@ -100,11 +100,11 @@ export default function App() {
   ];
 
   const DEFAULT_TEMPLATES: Record<string, string> = {
-    general: "You are a council of expert advisors. Analyze the problem from multiple angles, identify hidden risks, and propose a robust solution.",
-    frontend: "You are a council of staff-level frontend engineers. Focus on accessibility, performance, React best practices, and maintainable CSS architecture.",
-    backend: "You are a council of staff-level backend engineers. Focus on scalability, database performance, security, and API design.",
-    marketing: "You are a council of expert growth marketers. Focus on positioning, target audience, conversion optimization, and brand consistency.",
-    ops: "You are a council of expert COOs. Focus on process efficiency, resource allocation, risk mitigation, and operational scalability."
+    general: "You are participating in a town hall of expert advisors. Analyze the problem from multiple angles, identify hidden risks, and propose a robust solution.",
+    frontend: "You are participating in a town hall of staff-level frontend engineers. Focus on accessibility, performance, React best practices, and maintainable CSS architecture.",
+    backend: "You are participating in a town hall of staff-level backend engineers. Focus on scalability, database performance, security, and API design.",
+    marketing: "You are participating in a town hall of expert growth marketers. Focus on positioning, target audience, conversion optimization, and brand consistency.",
+    ops: "You are participating in a town hall of expert COOs. Focus on process efficiency, resource allocation, risk mitigation, and operational scalability."
   };
 
   const [templateContents, setTemplateContents] = useState<Record<string, string>>(DEFAULT_TEMPLATES);
@@ -972,7 +972,7 @@ export default function App() {
             <button
               onClick={() => setShowHowItWorks(true)}
               className="p-2 hover:bg-white/5 rounded-md text-white/40 hover:text-white transition-colors"
-              title="Methodology — How Cowork Council Works"
+              title="Methodology — How Town Hall Works"
             >
               <BookOpen className="w-4 h-4" />
             </button>
@@ -987,9 +987,9 @@ export default function App() {
                 <div className="w-16 h-16 bg-blue-500/10 rounded-2xl flex items-center justify-center border border-blue-500/20 mx-auto">
                   <Terminal className="w-8 h-8 text-blue-500" />
                 </div>
-                <h1 className="text-4xl font-bold tracking-tight">Cowork Council</h1>
+                <h1 className="text-4xl font-bold tracking-tight">Town Hall</h1>
                 <p className="text-white/40 text-lg max-w-xl mx-auto leading-relaxed">
-                  Select your council and define the topic. The models will attempt to apply reinforced first-principle thinking, challenge each other's assumptions, and converge on what they think is the highest-probability correct decision.
+                  Select your models and define the topic. The Town Hall will pressure-test the question from multiple angles and converge on the highest-probability correct decision it can defend.
                 </p>
                 <button 
                   onClick={() => setShowHowItWorks(true)}
@@ -1004,7 +1004,7 @@ export default function App() {
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-white/40 flex items-center gap-2">
                     <Settings2 className="w-4 h-4" />
-                    Council Configuration
+                    Town Hall Configuration
                     <Tip text="Pick which AI models join the discussion. More models = more perspectives but higher cost." />
                   </h3>
                   <div className="flex items-center gap-2">
@@ -1122,7 +1122,7 @@ export default function App() {
 
                   <div className="space-y-4 p-6 rounded-2xl border border-white/10 bg-white/[0.02] flex flex-col">
                     <div className="flex items-center justify-between">
-                      <label className="text-sm font-bold">Context for the Council</label>
+                      <label className="text-sm font-bold">Context for the Town Hall</label>
                     </div>
                     <p className="text-xs text-white/40 leading-relaxed">
                       Paste architecture docs, repo details, constraints, or any background the models should know.
@@ -1312,7 +1312,7 @@ export default function App() {
                 <div className="mt-16 pt-10 border-t border-white/10 flex flex-wrap justify-between items-end gap-8">
                   <div className="flex items-center gap-8">
                     <div className="space-y-2">
-                      <div className="text-[10px] uppercase tracking-widest text-white/30 font-bold">Confidence Score <Tip text="How confident the council is in this recommendation. Green = strong, Yellow = moderate, Red = uncertain." /></div>
+                      <div className="text-[10px] uppercase tracking-widest text-white/30 font-bold">Confidence Score <Tip text="How confident the Town Hall is in this recommendation. Green = strong, Yellow = moderate, Red = uncertain." /></div>
                       <div className="flex items-center gap-3">
                         {finalConfidence !== null ? (
                           <>
@@ -1386,7 +1386,7 @@ export default function App() {
                   This document is a permanent record of consensus reached on {format(new Date(), 'yyyy-MM-dd HH:mm:ss')}
                 </p>
                 <p className="text-[10px] text-white/10 max-w-lg mx-auto">
-                  Generated by Cowork Council Multi-Model Recommendation Engine.
+                  Generated by the Town Hall multi-model decision engine.
                 </p>
               </div>
             </div>
@@ -1534,7 +1534,7 @@ export default function App() {
                          phase === 'consensus_check' ? 'Checking Consensus...' :
                          phase === 'targeted_debate' ? 'Targeted Debate...' :
                          phase === 'synthesizing' ? 'Synthesizing...' :
-                         'Council is deliberating...'}
+                         'Town Hall is deliberating...'}
                       </span>
                     </div>
                   )}
@@ -1661,7 +1661,7 @@ export default function App() {
                 {clarificationMsgs.length > 0 && (
                   <div className="mb-3 max-h-48 overflow-y-auto custom-scrollbar rounded-lg bg-[#0a0a0a] border border-[#262626] p-3">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-white/40 uppercase tracking-wider">Questions from the Council</span>
+                      <span className="text-xs text-white/40 uppercase tracking-wider">Questions from the Town Hall</span>
                       <button
                         onClick={() => {
                           const allQs = clarificationMsgs.map(m => `[${(m as any).name || 'Model'}]\n${m.text}`).join('\n\n---\n\n');
@@ -1741,7 +1741,7 @@ export default function App() {
                 }}
                 placeholder={
                   activeThreadId ? "Address specific models (e.g. 'gemini, gpt - agree?') or follow up..." :
-                  "Enter a topic or question to start a Cowork Council..."
+                  "Enter a topic or question to start a Town Hall..."
                 }
                 className="w-full bg-[#121212] border border-[#262626] rounded-2xl py-4 pl-5 pr-14 text-sm focus:outline-none focus:border-blue-500/50 transition-all resize-none custom-scrollbar relative z-10"
               />
@@ -1819,7 +1819,7 @@ export default function App() {
             <div className="sticky top-0 bg-[#121212] border-b border-[#262626] p-6 flex items-center justify-between z-10">
               <h2 className="text-xl font-bold flex items-center gap-2">
                 <HelpCircle className="w-5 h-5 text-blue-500" />
-                How Cowork Council Works
+                How Town Hall Works
               </h2>
               <button 
                 onClick={() => setShowHowItWorks(false)}

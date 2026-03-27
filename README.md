@@ -1,8 +1,15 @@
-# Cowork Council
+# Town Hall
 
-Multi-model AI decision engine. Runs structured analysis across top-tier models (Claude Opus, Gemini Pro, GPT-5, o3, DeepSeek) and produces scored recommendations with confidence levels and autonomy classification.
+Multi-model AI decision engine for strategic pressure-testing, architecture review, and hard decisions. Runs structured analysis across top-tier models and produces a recommendation with confidence and clear caveats.
 
 Not a chatbot. Not a debate club. A tool that gets to the right answer.
+
+## Live
+
+- App: `https://cowork-council.vercel.app`
+- Repo: `go2impact/Town-Hall`
+
+Technical slugs such as `cowork-council` still exist in package/deployment internals for continuity. Human-facing naming should now be `Town Hall`.
 
 ## How it works
 
@@ -26,6 +33,19 @@ Not a chatbot. Not a debate club. A tool that gets to the right answer.
 Returns the full recap when `sync: true`. Set `X-Api-Key` header if `COUNCIL_API_KEY` is configured.
 
 **GET `/api/health`** — Check status and configured models
+
+## Canonical Docs
+
+This repo is now the canonical home for:
+- the working Town Hall app
+- Town Hall architecture references in `architecture/`
+- preserved Town Hall discussion history in `discussions/`
+
+Key references:
+- `architecture/town-hall-rules.md`
+- `architecture/town-hall-spec.md`
+- `discussions/2026-03-11-new-analysis-we-built-this-town-hall-for-decision.md`
+- `discussions/2026-03-11-town-hall-is-running-thread-20260311-225302-all-5.md`
 
 ## Run locally
 
